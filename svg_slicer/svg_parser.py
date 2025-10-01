@@ -8,8 +8,9 @@ from shapely.affinity import scale as shapely_scale
 from shapely.affinity import translate as shapely_translate
 from shapely.geometry import GeometryCollection, LineString, Polygon
 from shapely.ops import unary_union
+from shapely.ops import unary_union
 from shapely.geometry.base import BaseGeometry
-from svgelements import Arc, Color, Move, Path, SVG
+from svgelements import Arc, ClipPath, Color, Move, Path, SVG
 
 from .config import PrinterConfig, SamplingConfig
 
@@ -109,6 +110,55 @@ def _path_to_polygons(path: Path, tolerance: float) -> List[Polygon]:
         polygons.append(Polygon(shell.exterior.coords, hole_coords))
 
     return polygons
+
+
+def _clip_reference(element) -> str | None:
+    clip_value = None
+    if hasattr(element, "values"):
+        clip_value = element.values.get("clip-path")
+    if not clip_value:
+        return None
+    clip_value = clip_value.strip()
+    if clip_value.startswith("url(") and clip_value.endswith(")"):
+        inner = clip_value[4:-1].strip()
+        if inner.startswith("#"):
+            return inner[1:]
+    return None
+
+
+def _build_clip_paths(svg: SVG, sampling: SamplingConfig, svg_path: str) -> dict[str, BaseGeometry]:
+    clip_geometries: dict[str, BaseGeometry] = {}
+    try:
+        import xml.etree.ElementTree as ET
+
+        tree = ET.parse(svg_path)
+        root = tree.getroot()
+        namespace = "{http://www.w3.org/2000/svg}"
+        clip_ids = [node.get("id") for node in root.findall(f".//{namespace}clipPath") if node.get("id")]
+    except Exception:  # pragma: no cover - fallback for XML issues
+        clip_ids = []
+
+    for clip_id in clip_ids:
+        element = svg.get_element_by_id(clip_id)
+        if not isinstance(element, ClipPath):
+            continue
+        polygons: List[Polygon] = []
+        for child in element:
+            try:
+                child.reify()
+            except Exception:
+                pass
+            path_data = child.d() if hasattr(child, "d") and callable(child.d) else None
+            if not path_data:
+                continue
+            path = Path(path_data)
+            polygons.extend(_path_to_polygons(path, sampling.segment_tolerance))
+        if not polygons:
+            continue
+        geom = unary_union([poly.buffer(0) for poly in polygons if not poly.is_empty])
+        if not geom.is_empty:
+            clip_geometries[clip_id] = geom
+    return clip_geometries
 
 
 def _color_to_brightness(color: Color | None) -> float:
@@ -214,8 +264,25 @@ def _resolve_visibility(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]:
     return list(reversed(visible_reversed))
 
 
+def _apply_clip(polygons: List[Polygon], clip: BaseGeometry | None) -> List[Polygon]:
+    if clip is None:
+        return polygons
+    clipped: List[Polygon] = []
+    for polygon in polygons:
+        inter = polygon.intersection(clip)
+        if inter.is_empty:
+            continue
+        for piece in _geometry_to_polygons(inter):
+            if piece.is_empty or piece.area <= 0:
+                continue
+            clipped.append(piece)
+    return clipped
+
+
 def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
     svg = SVG.parse(svg_path)
+
+    clip_geometries = _build_clip_paths(svg, sampling, svg_path)
 
     shapes: List[ShapeGeometry] = []
 
@@ -241,18 +308,22 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
         if fill_color is not None and getattr(fill_color, "alpha", 0) not in (None, 0):
             polygons = _path_to_polygons(path, tolerance)
             if polygons:
-                brightness = _color_to_brightness(fill_color)
-                for polygon in polygons:
-                    polygon = polygon.buffer(0)
-                    if polygon.is_empty or polygon.area <= 0:
-                        continue
-                    shapes.append(
-                        ShapeGeometry(
-                            geometry=polygon,
-                            brightness=brightness,
-                            stroke_width=None,
+                clip_ref = _clip_reference(element)
+                clip_geom = clip_geometries.get(clip_ref) if clip_ref else None
+                polygons = _apply_clip(polygons, clip_geom)
+                if polygons:
+                    brightness = _color_to_brightness(fill_color)
+                    for polygon in polygons:
+                        polygon = polygon.buffer(0)
+                        if polygon.is_empty or polygon.area <= 0:
+                            continue
+                        shapes.append(
+                            ShapeGeometry(
+                                geometry=polygon,
+                                brightness=brightness,
+                                stroke_width=None,
+                            )
                         )
-                    )
 
         stroke_color = getattr(element, "stroke", None)
         stroke_width = getattr(element, "stroke_width", None)
@@ -265,18 +336,22 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
             if stroke_w > 0:
                 stroke_polygons = _path_to_stroke_polygons(path, stroke_w, tolerance)
                 if stroke_polygons:
-                    brightness = _color_to_brightness(stroke_color)
-                    for polygon in stroke_polygons:
-                        polygon = polygon.buffer(0)
-                        if polygon.is_empty or polygon.area <= 0:
-                            continue
-                        shapes.append(
-                            ShapeGeometry(
-                                geometry=polygon,
-                                brightness=brightness,
-                                stroke_width=stroke_w,
+                    clip_ref = _clip_reference(element)
+                    clip_geom = clip_geometries.get(clip_ref) if clip_ref else None
+                    stroke_polygons = _apply_clip(stroke_polygons, clip_geom)
+                    if stroke_polygons:
+                        brightness = _color_to_brightness(stroke_color)
+                        for polygon in stroke_polygons:
+                            polygon = polygon.buffer(0)
+                            if polygon.is_empty or polygon.area <= 0:
+                                continue
+                            shapes.append(
+                                ShapeGeometry(
+                                    geometry=polygon,
+                                    brightness=brightness,
+                                    stroke_width=stroke_w,
+                                )
                             )
-                        )
 
     return _resolve_visibility(shapes)
 

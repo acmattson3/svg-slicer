@@ -12,6 +12,7 @@ This project provides a command-line slicer that converts filled shapes from an 
 - Emits travel/drawing G-code with configurable speeds and Z-lift for pen-up travel moves.
 - Optional matplotlib preview plotting only the drawing moves on a white canvas.
 - Can save the preview to an image file for headless environments.
+- Roadmap: add font-to-path conversion so raw `<text>` elements can be plotted without manual outline conversion.
 - Automatically converts thick SVG strokes into filled regions and skips time-consuming hatching for ultra-thin details.
 - Roadmap item: add glyph conversion so raw `<text>` elements can be plotted without manual outline conversion.
 
