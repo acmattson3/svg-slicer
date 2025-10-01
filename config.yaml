@@ -28,12 +28,13 @@ printer:
     - M18 ; disable steppers
 infill:
   base_line_spacing_mm: 1.0
-  min_density: 0.15
+  min_density: 0.0
   max_density: 1.0
   angles_degrees: [45, -45]
 perimeter:
   thickness_mm: 0.45
   density: 1.0
+  min_fill_width_mm: 0.8
 sampling:
   segment_length_tolerance_mm: 0.5
   outline_simplify_tolerance_mm: 1.0

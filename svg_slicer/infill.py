@@ -45,23 +45,43 @@ def _point_distance(a: Point, b: Point) -> float:
 
 
 def _merge_boustrophedon(lines: Sequence[Polyline], max_gap: float) -> List[Polyline]:
+    pending: List[Polyline] = [list(line) for line in lines if len(line) >= 2]
+    if not pending:
+        return []
+
     merged: List[Polyline] = []
     current: Polyline = []
-    for line in lines:
-        if not line:
-            continue
+    last_point: Point | None = None
+
+    while pending:
         if not current:
+            line = pending.pop(0)
             current = list(line)
+            last_point = current[-1]
             continue
-        if _point_distance(current[-1], line[0]) <= max_gap:
-            if _point_distance(current[-1], line[0]) > 0:
+
+        # Choose the next line whose start is closest to the current end.
+        distances = [
+            _point_distance(last_point, line[0]) if last_point is not None else 0.0
+            for line in pending
+        ]
+        next_index = min(range(len(pending)), key=lambda idx: distances[idx])
+        line = pending.pop(next_index)
+        distance = distances[next_index] if last_point is not None else 0.0
+
+        if distance <= max_gap:
+            if distance > 0 and last_point is not None:
                 current.append(line[0])
             current.extend(line[1:])
+            last_point = current[-1]
         else:
             merged.append(current)
             current = list(line)
+            last_point = current[-1]
+
     if current:
         merged.append(current)
+
     return merged
 
 
@@ -129,7 +149,8 @@ def generate_rectilinear_infill(
 
         if index % 2 == 1:
             alternating.reverse()
-        merged = _merge_boustrophedon(alternating, max_gap=spacing * 2.0)
+        tolerance = max(spacing * (2 ** 0.5) * 1.05, 1e-4)
+        merged = _merge_boustrophedon(alternating, max_gap=tolerance)
         toolpaths.extend(merged)
 
     return [polyline for polyline in toolpaths if polyline]

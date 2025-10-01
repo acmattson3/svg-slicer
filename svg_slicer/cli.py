@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sys
 from pathlib import Path
 from typing import Iterable, List
 
-from shapely.geometry import GeometryCollection, LinearRing, LineString, MultiPolygon, Polygon
+from shapely.geometry import (
+    GeometryCollection,
+    LinearRing,
+    LineString,
+    MultiLineString,
+    MultiPolygon,
+    Polygon,
+)
 from shapely.geometry.base import BaseGeometry
 
 from .config import SlicerConfig, load_config
@@ -53,11 +61,73 @@ def _ring_to_polyline(ring: LinearRing, tolerance: float) -> List[tuple[float, f
     return [(float(x), float(y)) for x, y in simplified_coords]
 
 
+def _min_dimension(polygon: Polygon) -> float:
+    if polygon.is_empty:
+        return 0.0
+    rect = polygon.minimum_rotated_rectangle
+    coords = list(rect.exterior.coords)
+    if len(coords) < 2:
+        return 0.0
+    edges = [
+        LineString([coords[i], coords[i + 1]]).length
+        for i in range(len(coords) - 1)
+    ]
+    if not edges:
+        return 0.0
+    return min(edges)
+
+
+def _generate_perimeter_loops(
+    polygon: Polygon,
+    step: float,
+    target_width: float,
+    tolerance: float,
+) -> List[List[tuple[float, float]]]:
+    step = max(step, 1e-6)
+    target_width = max(target_width, step)
+    max_passes = max(1, int(math.ceil(target_width / step)))
+
+    loops: List[List[tuple[float, float]]] = []
+    current = polygon
+
+    for _ in range(max_passes):
+        if current.is_empty or current.area <= 0:
+            break
+        for poly in _geometry_to_polygons(current):
+            exterior = _ring_to_polyline(poly.exterior, tolerance)
+            if exterior:
+                loops.append(exterior)
+            for interior_ring in poly.interiors:
+                interior_polyline = _ring_to_polyline(interior_ring, tolerance)
+                if interior_polyline:
+                    loops.append(interior_polyline)
+        current = current.buffer(-step)
+
+    return [loop for loop in loops if len(loop) >= 2]
+
+
+def _build_stroke_toolpaths(shape: ShapeGeometry, config: SlicerConfig) -> List[Toolpath]:
+    if shape.stroke_width is None:
+        return []
+    loops = _generate_perimeter_loops(
+        polygon=shape.geometry,
+        step=config.perimeter.thickness,
+        target_width=shape.stroke_width,
+        tolerance=config.sampling.outline_simplify_tolerance,
+    )
+    return toolpaths_from_polylines(loops, tag="outline")
+
+
 def _build_toolpaths(shapes: Iterable[ShapeGeometry], config: SlicerConfig) -> List[Toolpath]:
     toolpaths: List[Toolpath] = []
     perimeter_width = max(config.perimeter.thickness, 0.0)
-    perimeter_density = max(config.perimeter.density, 0.0)
+    min_fill_width = max(config.perimeter.min_fill_width, 0.0)
     for shape in shapes:
+        if shape.stroke_width is not None:
+            stroke_paths = _build_stroke_toolpaths(shape, config)
+            toolpaths.extend(stroke_paths)
+            continue
+
         geometry = shape.geometry
         if geometry.is_empty:
             continue
@@ -83,48 +153,33 @@ def _build_toolpaths(shapes: Iterable[ShapeGeometry], config: SlicerConfig) -> L
             if perimeter_geom and not perimeter_geom.is_empty:
                 perimeter_geom = perimeter_geom.buffer(0)
                 for per_poly in _geometry_to_polygons(perimeter_geom):
-                    outlines: List[List[tuple[float, float]]] = []
-                    exterior = _ring_to_polyline(
-                        per_poly.exterior,
+                    min_width = _min_dimension(per_poly)
+                    target_width = max(perimeter_width, min_width)
+
+                    loops = _generate_perimeter_loops(
+                        per_poly,
+                        perimeter_width,
+                        target_width,
                         config.sampling.outline_simplify_tolerance,
                     )
-                    if exterior:
-                        outlines.append(exterior)
-                    for interior_ring in per_poly.interiors:
-                        interior_polyline = _ring_to_polyline(
-                            interior_ring,
-                            config.sampling.outline_simplify_tolerance,
-                        )
-                        if interior_polyline:
-                            outlines.append(interior_polyline)
-                    toolpaths.extend(toolpaths_from_polylines(outlines, tag="outline"))
+                    toolpaths.extend(toolpaths_from_polylines(loops, tag="outline"))
 
-                    perimeter_lines = generate_rectilinear_infill(
-                        per_poly,
-                        perimeter_density if perimeter_density > 0 else config.infill.max_density,
-                        config.infill,
-                    )
-                    toolpaths.extend(toolpaths_from_polylines(perimeter_lines, tag="outline"))
+                    if min_width < min_fill_width:
+                        interior_geom = None
             else:
-                outlines: List[List[tuple[float, float]]] = []
-                exterior = _ring_to_polyline(
-                    polygon.exterior,
+                loops = _generate_perimeter_loops(
+                    polygon,
+                    perimeter_width,
+                    max(perimeter_width, _min_dimension(polygon)),
                     config.sampling.outline_simplify_tolerance,
                 )
-                if exterior:
-                    outlines.append(exterior)
-                for interior_ring in polygon.interiors:
-                    interior_polyline = _ring_to_polyline(
-                        interior_ring,
-                        config.sampling.outline_simplify_tolerance,
-                    )
-                    if interior_polyline:
-                        outlines.append(interior_polyline)
-                toolpaths.extend(toolpaths_from_polylines(outlines, tag="outline"))
+                toolpaths.extend(toolpaths_from_polylines(loops, tag="outline"))
 
             if interior_geom and not interior_geom.is_empty:
                 interior_geom = interior_geom.buffer(0)
                 for infill_poly in _geometry_to_polygons(interior_geom):
+                    if min_fill_width > 0 and _min_dimension(infill_poly) < min_fill_width:
+                        continue
                     polylines = generate_rectilinear_infill(infill_poly, density, config.infill)
                     toolpaths.extend(toolpaths_from_polylines(polylines, tag="infill"))
     return toolpaths

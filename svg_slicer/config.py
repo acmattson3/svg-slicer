@@ -74,6 +74,7 @@ class RenderingConfig:
 class PerimeterConfig:
     thickness: float
     density: float
+    min_fill_width: float
 
 
 @dataclass
@@ -154,6 +155,7 @@ def load_config(path: str | pathlib.Path) -> SlicerConfig:
     perimeter = PerimeterConfig(
         thickness=float(perimeter_raw.get("thickness_mm", 0.45)),
         density=float(perimeter_raw.get("density", 1.0)),
+        min_fill_width=float(perimeter_raw.get("min_fill_width_mm", 0.8)),
     )
 
     rendering_raw = raw.get("rendering", {})
