@@ -13,6 +13,7 @@ This project provides a command-line slicer that converts filled shapes from an 
 - Optional matplotlib preview plotting only the drawing moves on a white canvas.
 - Can save the preview to an image file for headless environments.
 - Automatically converts thick SVG strokes into filled regions and skips time-consuming hatching for ultra-thin details.
+- Roadmap item: add glyph conversion so raw `<text>` elements can be plotted without manual outline conversion.
 
 ## Installation
 

@@ -44,7 +44,10 @@ def _point_distance(a: Point, b: Point) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
-def _merge_boustrophedon(lines: Sequence[Polyline], max_gap: float) -> List[Polyline]:
+def _merge_boustrophedon(
+    lines: Sequence[Polyline],
+    max_gap: float,
+) -> List[Polyline]:
     pending: List[Polyline] = [list(line) for line in lines if len(line) >= 2]
     if not pending:
         return []
@@ -60,7 +63,6 @@ def _merge_boustrophedon(lines: Sequence[Polyline], max_gap: float) -> List[Poly
             last_point = current[-1]
             continue
 
-        # Choose the next line whose start is closest to the current end.
         distances = [
             _point_distance(last_point, line[0]) if last_point is not None else 0.0
             for line in pending
@@ -85,6 +87,40 @@ def _merge_boustrophedon(lines: Sequence[Polyline], max_gap: float) -> List[Poly
     return merged
 
 
+def _glue_polylines(
+    polylines: List[Polyline],
+    tolerance: float,
+) -> List[Polyline]:
+    if not polylines:
+        return []
+
+    glued: List[Polyline] = []
+    current = list(polylines[0])
+
+    for polyline in polylines[1:]:
+        if len(polyline) < 2:
+            continue
+        start = current[-1]
+        start_distance = _point_distance(start, polyline[0])
+        end_distance = _point_distance(start, polyline[-1])
+        candidate = polyline
+
+        if end_distance < start_distance:
+            candidate = list(reversed(polyline))
+            start_distance = end_distance
+
+        if start_distance <= tolerance:
+            if start_distance > 0:
+                current.append(candidate[0])
+            current.extend(candidate[1:])
+        else:
+            glued.append(current)
+            current = list(candidate)
+
+    glued.append(current)
+    return glued
+
+
 def generate_rectilinear_infill(
     polygon: Polygon,
     density: float,
@@ -102,8 +138,6 @@ def generate_rectilinear_infill(
 
     minx, miny, maxx, maxy = polygon.bounds
     length_margin = math.hypot(maxx - minx, maxy - miny) + spacing
-
-    toolpaths: List[Polyline] = []
 
     centroid = polygon.centroid
     origin = (float(centroid.x), float(centroid.y))
@@ -155,7 +189,8 @@ def generate_rectilinear_infill(
         merged = _merge_boustrophedon(alternating, max_gap=tolerance)
         angle_paths.append([poly for poly in merged if poly])
 
-    return _interleave_orientations(angle_paths)
+    merged_paths = _interleave_orientations(angle_paths)
+    return _glue_polylines(merged_paths, tolerance)
 
 
 def _interleave_orientations(angle_polylines: List[List[Polyline]]) -> List[Polyline]:
