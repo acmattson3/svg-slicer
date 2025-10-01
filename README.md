@@ -8,7 +8,7 @@ This project provides a command-line slicer that converts filled shapes from an 
 - Parses SVG documents (via `svgelements`) and converts fills to grayscale so the line density reflects the shape brightness.
 - Uniformly scales and flips the design into printer coordinates while keeping within the configured X/Y borders.
 - Traces perimeter bands with configurable thickness, duplicating outline passes for stroke-width coverage and hatching stroke/fill regions (respecting SVG stroke widths when present) for solid coverage.
-- Generates rectilinear cross-hatch infill (configurable angles) for each filled shape—darker shapes receive denser line spacing, with line ordering optimised to finish one side of voids before crossing gaps.
+- Generates rectilinear cross-hatch infill (configurable angles) for each filled shape—darker shapes receive denser line spacing, and the slicer greedily chains line segments across both orientations to minimise pen lifts.
 - Emits travel/drawing G-code with configurable speeds and Z-lift for pen-up travel moves.
 - Optional matplotlib preview plotting only the drawing moves on a white canvas.
 - Can save the preview to an image file for headless environments.

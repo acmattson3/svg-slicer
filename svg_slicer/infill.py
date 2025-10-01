@@ -108,6 +108,8 @@ def generate_rectilinear_infill(
     centroid = polygon.centroid
     origin = (float(centroid.x), float(centroid.y))
 
+    angle_paths: List[List[Polyline]] = []
+
     for index, angle in enumerate(config.angles):
         rotated = rotate(polygon, -angle, origin=origin, use_radians=False)
         min_rx, min_ry, max_rx, max_ry = rotated.bounds
@@ -151,6 +153,64 @@ def generate_rectilinear_infill(
             alternating.reverse()
         tolerance = max(spacing * (2 ** 0.5) * 1.05, 1e-4)
         merged = _merge_boustrophedon(alternating, max_gap=tolerance)
-        toolpaths.extend(merged)
+        angle_paths.append([poly for poly in merged if poly])
 
-    return [polyline for polyline in toolpaths if polyline]
+    return _interleave_orientations(angle_paths)
+
+
+def _interleave_orientations(angle_polylines: List[List[Polyline]]) -> List[Polyline]:
+    candidates: List[Tuple[int, Polyline]] = []
+    for angle_index, polylines in enumerate(angle_polylines):
+        for polyline in polylines:
+            if len(polyline) >= 2:
+                candidates.append((angle_index, list(polyline)))
+
+    if not candidates:
+        return []
+
+    result: List[Polyline] = []
+    current_point: Point | None = None
+
+    while candidates:
+        if current_point is None:
+            angle_idx = min((angle for angle, _ in candidates), default=0)
+            for idx, (a_idx, poly) in enumerate(candidates):
+                if a_idx == angle_idx:
+                    chosen_index = idx
+                    chosen_poly = poly
+                    reverse = False
+                    break
+            else:
+                chosen_index = 0
+                chosen_poly = candidates[0][1]
+                reverse = False
+        else:
+            best_dist = float("inf")
+            chosen_index = 0
+            chosen_poly = candidates[0][1]
+            reverse = False
+            for idx, (_, poly) in enumerate(candidates):
+                start = poly[0]
+                end = poly[-1]
+                dist_start = _point_distance(current_point, start)
+                dist_end = _point_distance(current_point, end)
+                if dist_end < dist_start:
+                    dist = dist_end
+                    rev = True
+                else:
+                    dist = dist_start
+                    rev = False
+                if dist < best_dist - 1e-6 or (abs(dist - best_dist) <= 1e-6 and idx < chosen_index):
+                    best_dist = dist
+                    chosen_index = idx
+                    chosen_poly = poly
+                    reverse = rev
+
+        _, polyline = candidates.pop(chosen_index)
+        if reverse:
+            polyline = list(reversed(polyline))
+
+        result.append(polyline)
+        current_point = polyline[-1]
+
+    return result
