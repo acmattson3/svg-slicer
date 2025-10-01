@@ -1,0 +1,41 @@
+printer:
+  name: ExamplePenPlotter
+  bed_size_mm:
+    width: 220.0
+    depth: 220.0
+  origin_offsets_mm:
+    x_min: 14.0
+    x_max: 206.0
+    y_min: 14.0
+    y_max: 206.0
+  z_heights_mm:
+    draw: 0.0
+    travel: 4.0
+  z_lift_height_mm: 4.0
+  feedrates_mm_s:
+    draw: 175.0
+    travel: 175.0
+    z: 20.0
+  start_gcode:
+    - G21 ; use millimeters
+    - G90 ; absolute positioning
+    - G28 ; home all axes
+    - G1 Z4.000 F10500 ; lift pen to travel height
+    - G1 X14.000 Y14.000 F10500 ; move to front-left start
+  end_gcode:
+    - G1 Z4.000 F10500 ; lift pen
+    - G1 X14.000 Y206.000 F10500 ; park at rear-left
+    - M18 ; disable steppers
+infill:
+  base_line_spacing_mm: 1.0
+  min_density: 0.15
+  max_density: 1.0
+  angles_degrees: [45, -45]
+perimeter:
+  thickness_mm: 0.45
+  density: 1.0
+sampling:
+  segment_length_tolerance_mm: 0.5
+  outline_simplify_tolerance_mm: 1.0
+rendering:
+  preview_line_width_mm: 0.45
