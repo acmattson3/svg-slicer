@@ -5,7 +5,7 @@ import logging
 import math
 import sys
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Tuple
 
 from shapely.geometry import (
     GeometryCollection,
@@ -213,18 +213,28 @@ def _build_toolpaths(shapes: Iterable[ShapeGeometry], config: SlicerConfig) -> L
     return toolpaths
 
 
-def slice_svg_to_gcode(svg_path: Path, output_path: Path, config: SlicerConfig, preview: bool, preview_file: Path | None) -> None:
-    shapes = parse_svg(str(svg_path), config.sampling)
-    if not shapes:
+def generate_toolpaths_for_shapes(
+    shapes: Iterable[ShapeGeometry],
+    config: SlicerConfig,
+    *,
+    fit_to_bed: bool = True,
+) -> Tuple[List[Toolpath], float]:
+    shape_list = list(shapes)
+    if not shape_list:
         raise RuntimeError("No drawable shapes with fills were found in the SVG.")
 
-    fitted_shapes, scale_factor = fit_shapes_to_bed(shapes, config.printer)
-    logger.info("Scaled SVG by factor %.3f to fit printable area", scale_factor)
-
+    if fit_to_bed:
+        fitted_shapes, scale_factor = fit_shapes_to_bed(shape_list, config.printer)
+    else:
+        fitted_shapes = shape_list
+        scale_factor = 1.0
     toolpaths = _build_toolpaths(fitted_shapes, config)
     if not toolpaths:
         raise RuntimeError("No toolpaths were generated from the SVG.")
+    return toolpaths, scale_factor
 
+
+def write_toolpaths_to_gcode(toolpaths: Iterable[Toolpath], output_path: Path, config: SlicerConfig) -> int:
     generator = GcodeGenerator(config.printer)
     generator.emit_header()
     generator.draw_toolpaths(toolpaths, config.printer.feedrates)
@@ -233,6 +243,15 @@ def slice_svg_to_gcode(svg_path: Path, output_path: Path, config: SlicerConfig, 
     gcode_lines = generator.generate()
     output_path.write_text("\n".join(gcode_lines) + "\n", encoding="utf-8")
     logger.info("Wrote %d G-code lines to %s", len(gcode_lines), output_path)
+    return len(gcode_lines)
+
+
+def slice_svg_to_gcode(svg_path: Path, output_path: Path, config: SlicerConfig, preview: bool, preview_file: Path | None) -> None:
+    shapes = parse_svg(str(svg_path), config.sampling)
+    toolpaths, scale_factor = generate_toolpaths_for_shapes(shapes, config)
+    logger.info("Scaled SVG by factor %.3f to fit printable area", scale_factor)
+
+    write_toolpaths_to_gcode(toolpaths, output_path, config)
 
     if preview or preview_file:
         polylines = [toolpath.points for toolpath in toolpaths]

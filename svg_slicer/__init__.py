@@ -6,4 +6,5 @@ __all__ = [
     "infill",
     "svg_parser",
     "preview",
+    "gui",
 ]
