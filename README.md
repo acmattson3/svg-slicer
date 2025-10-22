@@ -4,6 +4,7 @@ This project provides a command-line slicer that converts filled shapes from an 
 
 ## Features
 
+- PySide6-powered GUI lets you queue multiple SVGs, scale and rotate each model interactively on a virtual build plate, preview toolpaths, and export G-code in one flow.
 - Loads configuration from YAML with typical printer settings (bed size, safe offsets, feedrates, lift heights, start/end sequences).
 - Parses SVG documents (via `svgelements`) and converts fills to grayscale so the line density reflects the shape brightness.
 - Uniformly scales and flips the design into printer coordinates while keeping within the configured X/Y borders.
@@ -43,6 +44,25 @@ Edit `config.yaml` to match your machine. Printer settings are organised into na
 The sample configuration provides two profiles (`ender3_pro` and `prusa_xl`) to mirror the setups used in previous revisions.
 
 ## Usage
+
+### GUI
+
+The GUI is the quickest way to manage multiple SVGs, tweak their placement, change scale/rotation, and generate G-code:
+
+```bash
+/usr/bin/python3 -m svg_slicer --config config.yaml
+```
+
+Key interactions:
+
+- Drag-and-drop SVG files (or use the “Add SVGs…” button) to queue models.
+- Select a model in the list to adjust its scale (%) or rotation (°) in the sidebar; the footprint readout updates live.
+- Drag models around the virtual build plate; the view auto-fits the printable area from your selected profile.
+- Click “Slice” to generate the toolpaths and save the G-code to the path shown at the bottom of the sidebar.
+
+On Wayland-based WSL environments the app automatically switches Qt to the `xcb` backend to avoid protocol errors.
+
+### CLI
 
 ```bash
 /usr/bin/python3 -m svg_slicer path/to/art.svg \
