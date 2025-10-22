@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import platform
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
 
@@ -45,7 +46,7 @@ except ImportError as exc:  # pragma: no cover - GUI dependencies are optional f
         "PySide6 is required to launch the SVG slicer GUI. Install it with `pip install PySide6`."
     ) from exc
 
-from shapely.affinity import scale as shapely_scale, translate as shapely_translate
+from shapely.affinity import rotate as shapely_rotate, scale as shapely_scale, translate as shapely_translate
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Polygon
 
 from .cli import generate_toolpaths_for_shapes, write_toolpaths_to_gcode
@@ -101,23 +102,128 @@ class LoadedModel:
     height: float = 0.0
     scale: float = 1.0
     initial_scale: float = 1.0
+    rotation_degrees: float = 0.0
     position: Tuple[float, float] = (0.0, 0.0)
+    bounding_width: float = 0.0
+    bounding_height: float = 0.0
+    _origin_offset: Tuple[float, float] = (0.0, 0.0)
     item: Optional["ModelGraphicsItem"] = None
 
-    def transformed_shapes(self) -> List[ShapeGeometry]:
+    def transformed_shapes(self, *, include_position: bool = True) -> List[ShapeGeometry]:
+        geometries, _ = self._compute_transformed_shapes(include_position=include_position)
+        return geometries
+
+    def display_shapes(self) -> List[ShapeGeometry]:
+        geometries, _ = self._compute_transformed_shapes(include_position=False)
+        return geometries
+
+    def footprint_dimensions(
+        self,
+        *,
+        scale: Optional[float] = None,
+        rotation: Optional[float] = None,
+    ) -> Tuple[float, float]:
+        _, bounds = self._scaled_rotated_geometries(
+            scale=self._sanitize_scale(scale),
+            rotation=self._sanitize_rotation(rotation),
+            capture_shapes=False,
+        )
+        min_x, min_y, max_x, max_y = bounds
+        return max(0.0, max_x - min_x), max(0.0, max_y - min_y)
+
+    def _compute_transformed_shapes(
+        self,
+        *,
+        include_position: bool,
+        scale: Optional[float] = None,
+        rotation: Optional[float] = None,
+    ) -> Tuple[List[ShapeGeometry], Tuple[float, float, float, float]]:
+        actual_scale = self._sanitize_scale(scale)
+        actual_rotation = self._sanitize_rotation(rotation)
+
+        staged, bounds = self._scaled_rotated_geometries(
+            scale=actual_scale,
+            rotation=actual_rotation,
+            capture_shapes=True,
+        )
+        min_x, min_y, max_x, max_y = bounds
+
+        offset_x = -min_x
+        offset_y = -min_y
+        translate_x = offset_x + (self.position[0] if include_position else 0.0)
+        translate_y = offset_y + (self.position[1] if include_position else 0.0)
+
         transformed: List[ShapeGeometry] = []
-        for shape in self.normalized_shapes:
-            geom = shapely_scale(shape.geometry, xfact=self.scale, yfact=self.scale, origin=(0, 0))
-            geom = shapely_translate(geom, xoff=self.position[0], yoff=self.position[1])
-            stroke_width = None if shape.stroke_width is None else shape.stroke_width * self.scale
+        for geom, brightness, stroke_width in staged or []:
+            if translate_x != 0.0 or translate_y != 0.0:
+                geom = shapely_translate(geom, xoff=translate_x, yoff=translate_y)
             transformed.append(
                 ShapeGeometry(
                     geometry=geom,
-                    brightness=shape.brightness,
+                    brightness=brightness,
                     stroke_width=stroke_width,
                 )
             )
-        return transformed
+
+        if scale is None and rotation is None:
+            self.bounding_width = max(0.0, max_x - min_x)
+            self.bounding_height = max(0.0, max_y - min_y)
+            self._origin_offset = (offset_x, offset_y)
+
+        return transformed, bounds
+
+    def _scaled_rotated_geometries(
+        self,
+        *,
+        scale: float,
+        rotation: float,
+        capture_shapes: bool,
+    ) -> Tuple[Optional[List[Tuple[Any, float, Optional[float]]]], Tuple[float, float, float, float]]:
+        staged: Optional[List[Tuple[Any, float, Optional[float]]]] = [] if capture_shapes else None
+
+        min_x = math.inf
+        min_y = math.inf
+        max_x = -math.inf
+        max_y = -math.inf
+
+        # Determine rotation origin in scaled coordinates if possible.
+        origin_x = self.width * scale / 2.0 if self.width else 0.0
+        origin_y = self.height * scale / 2.0 if self.height else 0.0
+        origin = (origin_x, origin_y)
+        rotate_needed = not math.isclose(rotation % 360.0, 0.0, abs_tol=1e-7)
+
+        for shape in self.normalized_shapes:
+            geom = shapely_scale(shape.geometry, xfact=scale, yfact=scale, origin=(0, 0))
+            if rotate_needed:
+                geom = shapely_rotate(geom, rotation, origin=origin, use_radians=False)
+            if not geom.is_empty:
+                bounds = geom.bounds
+                min_x = min(min_x, bounds[0])
+                min_y = min(min_y, bounds[1])
+                max_x = max(max_x, bounds[2])
+                max_y = max(max_y, bounds[3])
+            if capture_shapes and staged is not None:
+                staged.append(
+                    (
+                        geom,
+                        shape.brightness,
+                        None if shape.stroke_width is None else shape.stroke_width * scale,
+                    )
+                )
+
+        if min_x is math.inf or min_y is math.inf or max_x is -math.inf or max_y is -math.inf:
+            min_x = min_y = max_x = max_y = 0.0
+
+        return staged, (min_x, min_y, max_x, max_y)
+
+    def _sanitize_scale(self, scale: Optional[float]) -> float:
+        value = self.scale if scale is None else scale
+        return max(value, 1e-6)
+
+    def _sanitize_rotation(self, rotation: Optional[float]) -> float:
+        if rotation is None:
+            return self.rotation_degrees
+        return rotation
 
 
 def _add_polygon_to_path(path: QPainterPath, polygon: Polygon) -> None:
@@ -163,11 +269,10 @@ def _geometry_to_path(path: QPainterPath, geometry) -> None:  # type: ignore[no-
             _geometry_to_path(path, part)
 
 
-def build_model_path(shapes: Sequence[ShapeGeometry], scale: float) -> QPainterPath:
+def build_model_path(shapes: Sequence[ShapeGeometry]) -> QPainterPath:
     painter_path = QPainterPath()
     for shape in shapes:
-        geom = shapely_scale(shape.geometry, xfact=scale, yfact=scale, origin=(0, 0))
-        _geometry_to_path(painter_path, geom)
+        _geometry_to_path(painter_path, shape.geometry)
     return painter_path
 
 
@@ -205,7 +310,8 @@ class ModelGraphicsItem(QGraphicsPathItem):
         self.setPos(model.position[0], model.position[1])
 
     def refresh_path(self) -> None:
-        painter_path = build_model_path(self.model.normalized_shapes, self.model.scale)
+        shapes = self.model.display_shapes()
+        painter_path = build_model_path(shapes)
         self.setPath(painter_path)
 
     def set_bed_rect(self, bed_rect: QRectF) -> None:
@@ -498,6 +604,8 @@ class PrepareTab(QWidget):
     modelSelectionChanged = Signal(int)
     scaleApplyRequested = Signal(float)
     scaleResetRequested = Signal()
+    rotationApplyRequested = Signal(float)
+    rotationResetRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -555,7 +663,29 @@ class PrepareTab(QWidget):
 
         controls.addLayout(scale_row)
 
-        self.dimensions_label = QLabel("Size: —")
+        controls.addSpacing(8)
+        controls.addWidget(QLabel("Model rotation:"))
+
+        rotation_row = QHBoxLayout()
+        self.rotation_spin = QDoubleSpinBox()
+        self.rotation_spin.setRange(-180.0, 180.0)
+        self.rotation_spin.setDecimals(1)
+        self.rotation_spin.setSuffix(" °")
+        self.rotation_spin.setSingleStep(5.0)
+        self.rotation_spin.setEnabled(False)
+        rotation_row.addWidget(self.rotation_spin)
+
+        self.rotation_apply_button = QPushButton("Apply")
+        self.rotation_apply_button.setEnabled(False)
+        rotation_row.addWidget(self.rotation_apply_button)
+
+        self.rotation_reset_button = QPushButton("Reset")
+        self.rotation_reset_button.setEnabled(False)
+        rotation_row.addWidget(self.rotation_reset_button)
+
+        controls.addLayout(rotation_row)
+
+        self.dimensions_label = QLabel("Footprint: —")
         controls.addWidget(self.dimensions_label)
 
         button_row = QHBoxLayout()
@@ -581,6 +711,7 @@ class PrepareTab(QWidget):
         layout.addLayout(controls, stretch=2)
 
         self.scale_spin.valueChanged.connect(self._on_scale_value_changed)
+        self.rotation_spin.valueChanged.connect(self._on_rotation_value_changed)
 
         self.add_button.clicked.connect(self.addFilesRequested)
         self.remove_button.clicked.connect(self.removeSelectionRequested)
@@ -590,6 +721,8 @@ class PrepareTab(QWidget):
         self.filesDropped.connect(lambda _: self.status_label.setText(""))
         self.scale_apply_button.clicked.connect(self._emit_scale_apply)
         self.scale_reset_button.clicked.connect(lambda: self.scaleResetRequested.emit())
+        self.rotation_apply_button.clicked.connect(self._emit_rotation_apply)
+        self.rotation_reset_button.clicked.connect(lambda: self.rotationResetRequested.emit())
 
     def set_printer(self, printer: PrinterConfig) -> None:
         self.build_plate.set_printer(printer)
@@ -648,13 +781,20 @@ class PrepareTab(QWidget):
             self.scale_spin.setEnabled(False)
             self.scale_apply_button.setEnabled(False)
             self.scale_reset_button.setEnabled(False)
-            self.dimensions_label.setText("Size: —")
+            self.rotation_spin.setEnabled(False)
+            self.rotation_apply_button.setEnabled(False)
+            self.rotation_reset_button.setEnabled(False)
+            self.dimensions_label.setText("Footprint: —")
             self.scale_spin.blockSignals(True)
             self.scale_spin.setValue(100.0)
             self.scale_spin.blockSignals(False)
+            self.rotation_spin.blockSignals(True)
+            self.rotation_spin.setValue(0.0)
+            self.rotation_spin.blockSignals(False)
             return
 
         scale_value = pending_scale if pending_scale is not None else model.scale
+        rotation_value = model.rotation_degrees
 
         self.scale_spin.blockSignals(True)
         self.scale_spin.setEnabled(True)
@@ -664,12 +804,19 @@ class PrepareTab(QWidget):
         self.scale_apply_button.setEnabled(True)
         self.scale_reset_button.setEnabled(True)
 
-        width = model.width * scale_value
-        height = model.height * scale_value
+        self.rotation_spin.blockSignals(True)
+        self.rotation_spin.setEnabled(True)
+        self.rotation_spin.setValue(rotation_value)
+        self.rotation_spin.blockSignals(False)
+
+        self.rotation_apply_button.setEnabled(True)
+        self.rotation_reset_button.setEnabled(True)
+
+        width, height = model.footprint_dimensions(scale=scale_value, rotation=rotation_value)
         if width > 0 and height > 0:
-            self.dimensions_label.setText(f"Size: {width:.1f} × {height:.1f} mm")
+            self.dimensions_label.setText(f"Footprint: {width:.1f} × {height:.1f} mm")
         else:
-            self.dimensions_label.setText("Size: —")
+            self.dimensions_label.setText("Footprint: —")
 
     def _on_list_selection_changed(self) -> None:
         if self._ignore_list_signal:
@@ -687,12 +834,27 @@ class PrepareTab(QWidget):
         if not self.scale_spin.isEnabled() or not self._current_model:
             return
         scale_value = value / 100.0
-        width = self._current_model.width * scale_value
-        height = self._current_model.height * scale_value
+        rotation_value = self.rotation_spin.value()
+        width, height = self._current_model.footprint_dimensions(scale=scale_value, rotation=rotation_value)
         if width > 0 and height > 0:
-            self.dimensions_label.setText(f"Size: {width:.1f} × {height:.1f} mm")
+            self.dimensions_label.setText(f"Footprint: {width:.1f} × {height:.1f} mm")
         else:
-            self.dimensions_label.setText("Size: —")
+            self.dimensions_label.setText("Footprint: —")
+
+    def _emit_rotation_apply(self) -> None:
+        if not self.rotation_spin.isEnabled():
+            return
+        self.rotationApplyRequested.emit(self.rotation_spin.value())
+
+    def _on_rotation_value_changed(self, value: float) -> None:
+        if not self.rotation_spin.isEnabled() or not self._current_model:
+            return
+        scale_value = self.scale_spin.value() / 100.0
+        width, height = self._current_model.footprint_dimensions(scale=scale_value, rotation=value)
+        if width > 0 and height > 0:
+            self.dimensions_label.setText(f"Footprint: {width:.1f} × {height:.1f} mm")
+        else:
+            self.dimensions_label.setText("Footprint: —")
 
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)
@@ -1101,6 +1263,8 @@ class MainWindow(QMainWindow):
         self.prepare_tab.modelSelectionChanged.connect(self._on_model_selection_from_list)
         self.prepare_tab.scaleApplyRequested.connect(self._apply_scale_from_ui)
         self.prepare_tab.scaleResetRequested.connect(self._reset_selected_model_scale)
+        self.prepare_tab.rotationApplyRequested.connect(self._apply_rotation_from_ui)
+        self.prepare_tab.rotationResetRequested.connect(self._reset_selected_model_rotation)
         self.prepare_tab.build_plate.modelSelected.connect(lambda model: self._set_selected_model(model, origin="plate"))
 
         self.settings_tab.configApplied.connect(self._apply_new_config)
@@ -1159,25 +1323,30 @@ class MainWindow(QMainWindow):
         model.height = height
 
         printer = self.config.printer
-        max_scale = 1.0
-        if width > 0 and height > 0 and printer.printable_width > 0 and printer.printable_depth > 0:
-            raw_scale = min(printer.printable_width / width, printer.printable_depth / height)
-            max_scale = max(raw_scale * 0.98, 1e-6)
+        base_width, base_height = model.footprint_dimensions(scale=1.0, rotation=model.rotation_degrees)
+        scale_candidates: List[float] = []
+        if base_width > 0 and printer.printable_width > 0:
+            scale_candidates.append(printer.printable_width / base_width)
+        if base_height > 0 and printer.printable_depth > 0:
+            scale_candidates.append(printer.printable_depth / base_height)
+        max_scale = max(min(scale_candidates) * 0.98, 1e-6) if scale_candidates else 1.0
         max_scale = max(max_scale, 1e-6)
 
         if preserve_position:
+            model.display_shapes()
             model.initial_scale = max_scale
             current_scale = model.scale if model.scale > 0 else max_scale
-            new_scale = min(max(current_scale, 1e-6), max_scale if width > 0 and height > 0 else current_scale)
+            new_scale = min(max(current_scale, 1e-6), max_scale if scale_candidates else current_scale)
 
-            old_width = model.width * current_scale
-            old_height = model.height * current_scale
-            centre_x = model.position[0] + (old_width / 2.0 if old_width > 0 else 0.0)
-            centre_y = model.position[1] + (old_height / 2.0 if old_height > 0 else 0.0)
+            previous_width = model.bounding_width if model.bounding_width > 0 else model.width * current_scale
+            previous_height = model.bounding_height if model.bounding_height > 0 else model.height * current_scale
+            centre_x = model.position[0] + (previous_width / 2.0 if previous_width > 0 else 0.0)
+            centre_y = model.position[1] + (previous_height / 2.0 if previous_height > 0 else 0.0)
 
             model.scale = new_scale
-            scaled_width = width * model.scale
-            scaled_height = height * model.scale
+            model.display_shapes()
+            scaled_width = model.bounding_width if model.bounding_width > 0 else model.width * model.scale
+            scaled_height = model.bounding_height if model.bounding_height > 0 else model.height * model.scale
 
             if scaled_width > 0 and scaled_height > 0:
                 x = centre_x - scaled_width / 2.0
@@ -1187,8 +1356,9 @@ class MainWindow(QMainWindow):
         else:
             model.scale = max_scale
             model.initial_scale = max_scale
-            scaled_width = width * model.scale
-            scaled_height = height * model.scale
+            model.display_shapes()
+            scaled_width = model.bounding_width if model.bounding_width > 0 else model.width * model.scale
+            scaled_height = model.bounding_height if model.bounding_height > 0 else model.height * model.scale
 
             x = printer.x_min + max(0.0, (printer.printable_width - scaled_width) / 2.0)
             y = printer.y_min + max(0.0, (printer.printable_depth - scaled_height) / 2.0)
@@ -1210,8 +1380,10 @@ class MainWindow(QMainWindow):
         if not self.config:
             return
         printer = self.config.printer
-        width = model.width * model.scale
-        height = model.height * model.scale
+        # Refresh bounds so we clamp using the current rotated footprint.
+        model.display_shapes()
+        width = model.bounding_width if model.bounding_width > 0 else model.width * model.scale
+        height = model.bounding_height if model.bounding_height > 0 else model.height * model.scale
         x, y = model.position
 
         limit_x_min = printer.x_min
@@ -1276,31 +1448,71 @@ class MainWindow(QMainWindow):
             return
         self._apply_scale_to_model(self._selected_model, self._selected_model.initial_scale)
 
+    def _apply_rotation_from_ui(self, rotation: float) -> None:
+        if not self._selected_model:
+            return
+        self._apply_rotation_to_model(self._selected_model, rotation)
+
+    def _reset_selected_model_rotation(self) -> None:
+        if not self._selected_model:
+            return
+        self._apply_rotation_to_model(self._selected_model, 0.0)
+
+    def _apply_rotation_to_model(self, model: LoadedModel, rotation: float) -> None:
+        if not self.config:
+            return
+
+        model.display_shapes()
+        previous_width = model.bounding_width if model.bounding_width > 0 else model.width * model.scale
+        previous_height = model.bounding_height if model.bounding_height > 0 else model.height * model.scale
+        centre_x = model.position[0] + (previous_width / 2.0 if previous_width > 0 else 0.0)
+        centre_y = model.position[1] + (previous_height / 2.0 if previous_height > 0 else 0.0)
+
+        model.rotation_degrees = rotation
+        model.display_shapes()
+        width_after = model.bounding_width if model.bounding_width > 0 else model.width * model.scale
+        height_after = model.bounding_height if model.bounding_height > 0 else model.height * model.scale
+        if width_after > 0 and height_after > 0:
+            new_x = centre_x - width_after / 2.0
+            new_y = centre_y - height_after / 2.0
+        else:
+            new_x, new_y = model.position
+        model.position = (new_x, new_y)
+        self._constrain_model_within_bed(model)
+
+        if model.item:
+            self.prepare_tab.build_plate.update_model_item(model)
+
+        self._invalidate_toolpaths("Rotation updated; slice to regenerate G-code.")
+        self._append_log(f"[INFO] Updated rotation for {model.path.name} to {model.rotation_degrees:.1f}°")
+        self._update_selection_ui(origin="rotation")
+
     def _apply_scale_to_model(self, model: LoadedModel, scale: float) -> None:
         if not self.config:
             return
-        scale = max(scale, 1e-6)
-
+        requested_scale = max(scale, 1e-6)
         printer = self.config.printer
-        max_scale = 1.0
-        if model.width > 0 and model.height > 0 and printer.printable_width > 0 and printer.printable_depth > 0:
-            raw_scale = min(printer.printable_width / model.width, printer.printable_depth / model.height)
-            max_scale = max(raw_scale * 0.98, 1e-6)
+        base_width, base_height = model.footprint_dimensions(scale=1.0, rotation=model.rotation_degrees)
+        scale_candidates: List[float] = []
+        if base_width > 0 and printer.printable_width > 0:
+            scale_candidates.append(printer.printable_width / base_width)
+        if base_height > 0 and printer.printable_depth > 0:
+            scale_candidates.append(printer.printable_depth / base_height)
+        max_scale = max(min(scale_candidates) * 0.98, 1e-6) if scale_candidates else requested_scale
         max_scale = max(max_scale, 1e-6)
-        if model.width > 0 and model.height > 0:
-            scale = min(scale, max_scale)
+        effective_scale = min(requested_scale, max_scale) if scale_candidates else requested_scale
 
-        previous_scale = model.scale if model.scale > 0 else model.initial_scale
-        scale = max(scale, 1e-6)
+        model.display_shapes()
+        current_scale = model.scale if model.scale > 0 else model.initial_scale
+        previous_width = model.bounding_width if model.bounding_width > 0 else model.width * current_scale
+        previous_height = model.bounding_height if model.bounding_height > 0 else model.height * current_scale
+        centre_x = model.position[0] + (previous_width / 2.0 if previous_width > 0 else 0.0)
+        centre_y = model.position[1] + (previous_height / 2.0 if previous_height > 0 else 0.0)
 
-        width_before = model.width * previous_scale
-        height_before = model.height * previous_scale
-        centre_x = model.position[0] + (width_before / 2.0 if width_before > 0 else 0.0)
-        centre_y = model.position[1] + (height_before / 2.0 if height_before > 0 else 0.0)
-
-        model.scale = scale
-        width_after = model.width * model.scale
-        height_after = model.height * model.scale
+        model.scale = effective_scale
+        model.display_shapes()
+        width_after = model.bounding_width if model.bounding_width > 0 else model.width * model.scale
+        height_after = model.bounding_height if model.bounding_height > 0 else model.height * model.scale
         if width_after > 0 and height_after > 0:
             new_x = centre_x - width_after / 2.0
             new_y = centre_y - height_after / 2.0
