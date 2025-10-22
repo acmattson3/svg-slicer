@@ -28,22 +28,26 @@ No additional virtual environment is required; the CLI runs with the system Pyth
 
 ## Configuration
 
-Edit `config.yaml` to match your machine. Key sections include:
+Edit `config.yaml` to match your machine. Printer settings are organised into named profiles so you can switch between different hardware or toolheads with a flag:
 
-- `printer.bed_size_mm`: overall bed dimensions (default 220 mm square).
-- `printer.origin_offsets_mm`: usable area (defaults to a 14 mm border on all sides).
-- `printer.z_heights_mm` and `printer.z_lift_height_mm`: drawing and travel heights (default travel/lift 4 mm).
-- `printer.feedrates_mm_s`: drawing, travel, and Z feedrates expressed in mm/s (defaults to 175 mm/s for XY moves).
-- `perimeter`: thickness (defaults to 0.45 mm), density (defaults to fully solid), and the minimum width at which hatch infill is attempted (default 0.8 mm).
-- `infill`: base line spacing and min/max density along with the infill angles (1 mm spacing at 100% density by default).
+- `default_printer`: optional name of the profile selected when `--printer-profile` is omitted (falls back to the first profile otherwise).
+- `printers.<profile>.bed_size_mm`: overall bed dimensions for each profile.
+- `printers.<profile>.origin_offsets_mm`: usable XY area relative to the machine origin.
+- `printers.<profile>.z_heights_mm` and `printers.<profile>.z_lift_height_mm`: commanded pen-down, travel, and lift heights.
+- `printers.<profile>.feedrates_mm_s`: drawing, travel, and Z feedrates expressed in mm/s.
+- `perimeter`: thickness, density, and the minimum width at which hatch infill is attempted.
+- `infill`: base line spacing and min/max density along with the infill angles.
 - `sampling.segment_length_tolerance_mm`: detail level when converting curves to polygons.
 - `sampling.outline_simplify_tolerance_mm`: optional smoothing for outlines to reduce extremely small linear segments.
+
+The sample configuration provides two profiles (`ender3_pro` and `prusa_xl`) to mirror the setups used in previous revisions.
 
 ## Usage
 
 ```bash
 /usr/bin/python3 -m svg_slicer path/to/art.svg \
   --config config.yaml \
+  --printer-profile ender3_pro \
   --output out.gcode \
   --preview-file preview.png
 ```
@@ -52,6 +56,7 @@ Flags:
 
 - `--preview` opens an interactive matplotlib plot of the drawing moves.
 - `--preview-file` saves the preview image instead (helpful on headless systems).
+- `--printer-profile` picks a named printer profile from the configuration file.
 - `--log-level` adjusts verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`).
 
 Generated G-code starts with the configured start-up sequence (home → lift → move to front-left origin), traces perimeter bands, then applies cross-hatch infill with spacing tied to grayscale brightness while respecting SVG stacking order so upper shapes mask lower ones.

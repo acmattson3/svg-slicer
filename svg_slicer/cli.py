@@ -16,6 +16,10 @@ from shapely.geometry import (
     Polygon,
 )
 from shapely.geometry.base import BaseGeometry
+try:
+    from shapely.validation import make_valid as shapely_make_valid
+except ImportError:  # pragma: no cover - older Shapely versions
+    shapely_make_valid = None
 
 from .config import SlicerConfig, load_config
 from .gcode import GcodeGenerator, Toolpath, toolpaths_from_polylines
@@ -26,6 +30,25 @@ from .svg_parser import ShapeGeometry, fit_shapes_to_bed, parse_svg
 logger = logging.getLogger(__name__)
 
 
+def _clean_geometry(geometry: BaseGeometry) -> BaseGeometry:
+    if geometry.is_empty:
+        return geometry
+    geom = geometry
+    if geom.is_valid:
+        return geom
+    if shapely_make_valid is not None:
+        try:
+            geom = shapely_make_valid(geom)
+        except Exception:  # pragma: no cover - defensive
+            geom = geometry
+    if not geom.is_valid:
+        try:
+            geom = geom.buffer(0)
+        except Exception:  # pragma: no cover - defensive
+            return geometry
+    return geom
+
+
 def _brightness_to_density(brightness: float, config: SlicerConfig) -> float:
     # Map brightness (0=black, 1=white) into density range.
     dynamic_range = config.infill.max_density - config.infill.min_density
@@ -33,6 +56,7 @@ def _brightness_to_density(brightness: float, config: SlicerConfig) -> float:
 
 
 def _geometry_to_polygons(geometry: BaseGeometry) -> List[Polygon]:
+    geometry = _clean_geometry(geometry)
     if geometry.is_empty:
         return []
     if isinstance(geometry, Polygon):
@@ -52,7 +76,7 @@ def _ring_to_polyline(ring: LinearRing, tolerance: float) -> List[tuple[float, f
     if len(coords) < 2:
         return []
     line = LineString(coords)
-    simplified = line.simplify(max(tolerance, 0.0), preserve_topology=False)
+    simplified = line.simplify(max(tolerance, 0.0), preserve_topology=True)
     simplified_coords = list(simplified.coords)
     if len(simplified_coords) < 3:
         simplified_coords = coords
@@ -83,6 +107,7 @@ def _generate_perimeter_loops(
     target_width: float,
     tolerance: float,
 ) -> List[List[tuple[float, float]]]:
+    polygon = _clean_geometry(polygon)
     step = max(step, 1e-6)
     target_width = max(target_width, step)
     max_passes = max(1, int(math.ceil(target_width / step)))
@@ -91,6 +116,7 @@ def _generate_perimeter_loops(
     current = polygon
 
     for _ in range(max_passes):
+        current = _clean_geometry(current)
         if current.is_empty or current.area <= 0:
             break
         for poly in _geometry_to_polygons(current):
@@ -138,20 +164,21 @@ def _build_toolpaths(shapes: Iterable[ShapeGeometry], config: SlicerConfig) -> L
             continue
         density = _brightness_to_density(shape.brightness, config)
         for polygon in polygons:
+            polygon = _clean_geometry(polygon)
             perimeter_geom: BaseGeometry | None = None
             interior_geom: BaseGeometry | None = polygon
 
             if perimeter_width > 0:
-                inner = polygon.buffer(-perimeter_width)
+                inner = _clean_geometry(polygon.buffer(-perimeter_width))
                 if inner.is_empty:
                     perimeter_geom = polygon
                     interior_geom = None
                 else:
-                    perimeter_geom = polygon.difference(inner)
+                    perimeter_geom = _clean_geometry(polygon.difference(inner))
                     interior_geom = inner
 
             if perimeter_geom and not perimeter_geom.is_empty:
-                perimeter_geom = perimeter_geom.buffer(0)
+                perimeter_geom = _clean_geometry(perimeter_geom)
                 for per_poly in _geometry_to_polygons(perimeter_geom):
                     min_width = _min_dimension(per_poly)
                     target_width = max(perimeter_width, min_width)
@@ -176,8 +203,9 @@ def _build_toolpaths(shapes: Iterable[ShapeGeometry], config: SlicerConfig) -> L
                 toolpaths.extend(toolpaths_from_polylines(loops, tag="outline"))
 
             if interior_geom and not interior_geom.is_empty:
-                interior_geom = interior_geom.buffer(0)
+                interior_geom = _clean_geometry(interior_geom)
                 for infill_poly in _geometry_to_polygons(interior_geom):
+                    infill_poly = _clean_geometry(infill_poly)
                     if min_fill_width > 0 and _min_dimension(infill_poly) < min_fill_width:
                         continue
                     polylines = generate_rectilinear_infill(infill_poly, density, config.infill)
@@ -215,6 +243,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Slice an SVG into G-code for pen plotter 3D printers.")
     parser.add_argument("svg", type=Path, help="Path to the source SVG file")
     parser.add_argument("--config", type=Path, default=Path("config.yaml"), help="Path to slicer configuration YAML")
+    parser.add_argument(
+        "--printer-profile",
+        type=str,
+        default=None,
+        help="Name of the printer profile to use from the configuration file",
+    )
     parser.add_argument("--output", type=Path, default=Path("output.gcode"), help="Destination G-code file")
     parser.add_argument("--preview", action="store_true", help="Display a matplotlib preview of the toolpaths")
     parser.add_argument(
@@ -238,7 +272,7 @@ def main(argv: List[str] | None = None) -> int:
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper()), format="[%(levelname)s] %(message)s")
 
-    config = load_config(args.config)
+    config = load_config(args.config, profile=args.printer_profile)
 
     try:
         slice_svg_to_gcode(args.svg, args.output, config, args.preview, args.preview_file)

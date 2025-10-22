@@ -47,6 +47,7 @@ def _point_distance(a: Point, b: Point) -> float:
 def _merge_boustrophedon(
     lines: Sequence[Polyline],
     max_gap: float,
+    region: Polygon | None = None,
 ) -> List[Polyline]:
     pending: List[Polyline] = [list(line) for line in lines if len(line) >= 2]
     if not pending:
@@ -72,6 +73,13 @@ def _merge_boustrophedon(
         distance = distances[next_index] if last_point is not None else 0.0
 
         if distance <= max_gap:
+            if distance > 0 and last_point is not None and region is not None:
+                connector = LineString([last_point, line[0]])
+                if not region.buffer(1e-9).covers(connector):
+                    merged.append(current)
+                    current = list(line)
+                    last_point = current[-1]
+                    continue
             if distance > 0 and last_point is not None:
                 current.append(line[0])
             current.extend(line[1:])
@@ -90,6 +98,7 @@ def _merge_boustrophedon(
 def _glue_polylines(
     polylines: List[Polyline],
     tolerance: float,
+    region: Polygon | None = None,
 ) -> List[Polyline]:
     if not polylines:
         return []
@@ -108,8 +117,13 @@ def _glue_polylines(
         if end_distance < start_distance:
             candidate = list(reversed(polyline))
             start_distance = end_distance
-
         if start_distance <= tolerance:
+            if start_distance > 0 and region is not None:
+                connector = LineString([start, candidate[0]])
+                if not region.buffer(1e-9).covers(connector):
+                    glued.append(current)
+                    current = list(candidate)
+                    continue
             if start_distance > 0:
                 current.append(candidate[0])
             current.extend(candidate[1:])
@@ -143,6 +157,8 @@ def generate_rectilinear_infill(
     origin = (float(centroid.x), float(centroid.y))
 
     angle_paths: List[List[Polyline]] = []
+    merge_tolerance = min(spacing * 0.25, config.base_spacing * 0.25)
+    merge_tolerance = max(merge_tolerance, 1e-4)
 
     for index, angle in enumerate(config.angles):
         rotated = rotate(polygon, -angle, origin=origin, use_radians=False)
@@ -185,12 +201,11 @@ def generate_rectilinear_infill(
 
         if index % 2 == 1:
             alternating.reverse()
-        tolerance = max(spacing * (2 ** 0.5) * 1.05, 1e-4)
-        merged = _merge_boustrophedon(alternating, max_gap=tolerance)
+        merged = _merge_boustrophedon(alternating, max_gap=merge_tolerance, region=polygon)
         angle_paths.append([poly for poly in merged if poly])
 
     merged_paths = _interleave_orientations(angle_paths)
-    return _glue_polylines(merged_paths, tolerance)
+    return _glue_polylines(merged_paths, merge_tolerance, region=polygon)
 
 
 def _interleave_orientations(angle_polylines: List[List[Polyline]]) -> List[Polyline]:

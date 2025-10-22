@@ -1,31 +1,62 @@
-printer:
-  name: ExamplePenPlotter
-  bed_size_mm:
-    width: 220.0
-    depth: 220.0
-  origin_offsets_mm:
-    x_min: 14.0
-    x_max: 206.0
-    y_min: 14.0
-    y_max: 206.0
-  z_heights_mm:
-    draw: 0.0
-    travel: 4.0
-  z_lift_height_mm: 4.0
-  feedrates_mm_s:
-    draw: 175.0
-    travel: 175.0
-    z: 20.0
-  start_gcode:
-    - G21 ; use millimeters
-    - G90 ; absolute positioning
-    - G28 ; home all axes
-    - G1 Z4.000 F10500 ; lift pen to travel height
-    - G1 X14.000 Y14.000 F10500 ; move to front-left start
-  end_gcode:
-    - G1 Z4.000 F10500 ; lift pen
-    - G1 X14.000 Y206.000 F10500 ; park at rear-left
-    - M18 ; disable steppers
+default_printer: ender3_pro
+printers:
+  ender3_pro:
+    name: Ender 3 Pro
+    bed_size_mm:
+      width: 210.0
+      depth: 210.0
+    origin_offsets_mm:
+      x_min: 10.0
+      x_max: 210.0
+      y_min: 10.0
+      y_max: 210.0
+    z_heights_mm:
+      draw: 0.0
+      travel: 1.5
+    z_lift_height_mm: 1.5
+    feedrates_mm_s:
+      draw: 175.0
+      travel: 175.0
+      z: 20.0
+    start_gcode:
+      - G21 ; use millimeters
+      - G90 ; absolute positioning
+      - G28 ; home all axes
+      - G1 Z2.0 F10500 ; lift pen to travel height
+      - G1 X14.000 Y14.000 F10500 ; move to front-left start
+    end_gcode:
+      - G1 Z2.0.000 F10500 ; lift pen
+      - G1 X14.000 Y206.000 F10500 ; park at rear-left
+      - M18 ; disable steppers
+  prusa_xl:
+    name: Prusa XL
+    bed_size_mm:
+      width: 360.0
+      depth: 360.0
+    origin_offsets_mm:
+      x_min: 4.0
+      x_max: 209.0
+      y_min: 79.0
+      y_max: 296.0
+    z_heights_mm:
+      draw: 17.0
+      travel: 19.0
+    z_lift_height_mm: 1.0
+    feedrates_mm_s:
+      draw: 400.0
+      travel: 400.0
+      z: 20.0
+    start_gcode:
+      - G21 ; use millimeters
+      - G90 ; absolute positioning
+      - G28 ; home all axes
+      - G1 Z39.000 F10500 ; lift pen to travel height
+      - P0 S1 ; Park XL Head
+      - G1 X0.000 Y66.000 F10500 ; move to front-left start
+    end_gcode:
+      - G1 Z39.000 F10500 ; lift pen
+      - G1 X0.000 Y350.000 F10500 ; park at rear-left
+      - M18 ; disable steppers
 infill:
   base_line_spacing_mm: 1.0
   min_density: 0.0

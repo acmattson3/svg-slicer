@@ -96,15 +96,7 @@ def _require(mapping: Dict[str, Any], key: str) -> Any:
     return mapping[key]
 
 
-def load_config(path: str | pathlib.Path) -> SlicerConfig:
-    config_path = pathlib.Path(path)
-    if not config_path.exists():
-        raise ConfigError(f"Configuration file not found: {config_path}")
-
-    with config_path.open("r", encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh) or {}
-
-    printer_raw = _require(raw, "printer")
+def _parse_printer_config(printer_raw: Dict[str, Any], fallback_name: str | None = None) -> PrinterConfig:
     bed = _require(printer_raw, "bed_size_mm")
     offsets = _require(printer_raw, "origin_offsets_mm")
     z_heights = _require(printer_raw, "z_heights_mm")
@@ -116,8 +108,10 @@ def load_config(path: str | pathlib.Path) -> SlicerConfig:
         z_mm_s=float(_require(feedrates_raw, "z")),
     )
 
-    printer = PrinterConfig(
-        name=str(printer_raw.get("name", "PenPlotter")),
+    printer_name = str(printer_raw.get("name", fallback_name or "PenPlotter"))
+
+    return PrinterConfig(
+        name=printer_name,
         bed_width=float(_require(bed, "width")),
         bed_depth=float(_require(bed, "depth")),
         x_min=float(_require(offsets, "x_min")),
@@ -131,6 +125,54 @@ def load_config(path: str | pathlib.Path) -> SlicerConfig:
         start_gcode=list(printer_raw.get("start_gcode", [])),
         end_gcode=list(printer_raw.get("end_gcode", [])),
     )
+
+
+def load_config(path: str | pathlib.Path, profile: str | None = None) -> SlicerConfig:
+    config_path = pathlib.Path(path)
+    if not config_path.exists():
+        raise ConfigError(f"Configuration file not found: {config_path}")
+
+    with config_path.open("r", encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh) or {}
+
+    printer_raw: Dict[str, Any]
+    printer_profile_name: str | None = None
+
+    if "printers" in raw:
+        printers_section = raw.get("printers")
+        if not isinstance(printers_section, dict) or not printers_section:
+            raise ConfigError("'printers' must be a non-empty mapping of profiles.")
+
+        if profile is None:
+            default_profile = raw.get("default_printer")
+            if default_profile:
+                if default_profile not in printers_section:
+                    available = ", ".join(sorted(printers_section))
+                    raise ConfigError(
+                        f"Default printer profile '{default_profile}' not found. Available profiles: {available}"
+                    )
+                printer_profile_name = str(default_profile)
+            else:
+                printer_profile_name = next(iter(printers_section))
+        else:
+            if profile not in printers_section:
+                available = ", ".join(sorted(printers_section))
+                raise ConfigError(
+                    f"Printer profile '{profile}' not found. Available profiles: {available}"
+                )
+            printer_profile_name = str(profile)
+
+        printer_raw = printers_section[printer_profile_name]
+        if not isinstance(printer_raw, dict):
+            raise ConfigError(f"Printer profile '{printer_profile_name}' must be a mapping of settings.")
+    else:
+        if profile is not None:
+            raise ConfigError(
+                "Printer profile specified but configuration does not define any profiles."
+            )
+        printer_raw = _require(raw, "printer")
+
+    printer = _parse_printer_config(printer_raw, fallback_name=printer_profile_name)
 
     infill_raw = _require(raw, "infill")
     infill = InfillConfig(
