@@ -281,6 +281,52 @@ def _color_distance(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
     return math.sqrt(dr * dr + dg * dg + db * db)
 
 
+_GRAY_SATURATION_THRESHOLD = 0.08
+
+
+def _rgb_brightness(rgb: tuple[int, int, int]) -> float:
+    r, g, b = rgb
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+
+
+def _rgb_saturation(rgb: tuple[int, int, int]) -> float:
+    r, g, b = rgb
+    maxc = max(r, g, b)
+    minc = min(r, g, b)
+    if maxc == 0:
+        return 0.0
+    return (maxc - minc) / maxc
+
+
+def _find_closest_palette_color(
+    source: tuple[int, int, int],
+    palette: List[str],
+    palette_rgb: Dict[str, tuple[int, int, int]],
+    palette_order: Dict[str, int],
+    grayscale_palette: List[str],
+    palette_brightness: Dict[str, float],
+) -> str:
+    source_sat = _rgb_saturation(source)
+    source_brightness = _rgb_brightness(source)
+
+    if grayscale_palette and source_sat <= _GRAY_SATURATION_THRESHOLD:
+        return min(
+            grayscale_palette,
+            key=lambda color: (
+                abs(source_brightness - palette_brightness[color]),
+                palette_order.get(color, math.inf),
+            ),
+        )
+
+    return min(
+        palette,
+        key=lambda color: (
+            _color_distance(source, palette_rgb[color]),
+            palette_order.get(color, math.inf),
+        ),
+    )
+
+
 def _toolpath_length(toolpath: Toolpath) -> float:
     length = 0.0
     points = list(toolpath.points)
@@ -299,6 +345,9 @@ def _plan_color_sequence(toolpaths: List[Toolpath], config: SlicerConfig) -> Col
     palette = printer.available_colors
     palette_rgb = {color: _hex_to_rgb(color) for color in palette}
     palette_order = {color: index for index, color in enumerate(palette)}
+    palette_brightness = {color: _rgb_brightness(rgb) for color, rgb in palette_rgb.items()}
+    palette_saturation = {color: _rgb_saturation(rgb) for color, rgb in palette_rgb.items()}
+    grayscale_palette = [color for color, sat in palette_saturation.items() if sat <= _GRAY_SATURATION_THRESHOLD]
 
     color_groups: Dict[str, List[Toolpath]] = {}
     usage: Dict[str, float] = {}
@@ -306,7 +355,14 @@ def _plan_color_sequence(toolpaths: List[Toolpath], config: SlicerConfig) -> Col
 
     for toolpath in toolpaths:
         source = toolpath.source_color or fallback_rgb
-        best_color = min(palette, key=lambda color: _color_distance(source, palette_rgb[color]))
+        best_color = _find_closest_palette_color(
+            source,
+            palette,
+            palette_rgb,
+            palette_order,
+            grayscale_palette,
+            palette_brightness,
+        )
         toolpath.assigned_color = best_color
         color_groups.setdefault(best_color, []).append(toolpath)
         usage[best_color] = usage.get(best_color, 0.0) + _toolpath_length(toolpath)
