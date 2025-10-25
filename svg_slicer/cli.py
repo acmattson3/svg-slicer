@@ -4,8 +4,9 @@ import argparse
 import logging
 import math
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 from shapely.geometry import (
     GeometryCollection,
@@ -141,7 +142,7 @@ def _build_stroke_toolpaths(shape: ShapeGeometry, config: SlicerConfig) -> List[
         target_width=shape.stroke_width,
         tolerance=config.sampling.outline_simplify_tolerance,
     )
-    return toolpaths_from_polylines(loops, tag="outline")
+    return toolpaths_from_polylines(loops, tag="outline", source_color=shape.color, brightness=shape.brightness)
 
 
 def _build_toolpaths(shapes: Iterable[ShapeGeometry], config: SlicerConfig) -> List[Toolpath]:
@@ -189,7 +190,14 @@ def _build_toolpaths(shapes: Iterable[ShapeGeometry], config: SlicerConfig) -> L
                         target_width,
                         config.sampling.outline_simplify_tolerance,
                     )
-                    toolpaths.extend(toolpaths_from_polylines(loops, tag="outline"))
+                    toolpaths.extend(
+                        toolpaths_from_polylines(
+                            loops,
+                            tag="outline",
+                            source_color=shape.color,
+                            brightness=shape.brightness,
+                        )
+                    )
 
                     if min_width < min_fill_width:
                         interior_geom = None
@@ -200,7 +208,14 @@ def _build_toolpaths(shapes: Iterable[ShapeGeometry], config: SlicerConfig) -> L
                     max(perimeter_width, _min_dimension(polygon)),
                     config.sampling.outline_simplify_tolerance,
                 )
-                toolpaths.extend(toolpaths_from_polylines(loops, tag="outline"))
+                toolpaths.extend(
+                    toolpaths_from_polylines(
+                        loops,
+                        tag="outline",
+                        source_color=shape.color,
+                        brightness=shape.brightness,
+                    )
+                )
 
             if interior_geom and not interior_geom.is_empty:
                 interior_geom = _clean_geometry(interior_geom)
@@ -209,7 +224,14 @@ def _build_toolpaths(shapes: Iterable[ShapeGeometry], config: SlicerConfig) -> L
                     if min_fill_width > 0 and _min_dimension(infill_poly) < min_fill_width:
                         continue
                     polylines = generate_rectilinear_infill(infill_poly, density, config.infill)
-                    toolpaths.extend(toolpaths_from_polylines(polylines, tag="infill"))
+                    toolpaths.extend(
+                        toolpaths_from_polylines(
+                            polylines,
+                            tag="infill",
+                            source_color=shape.color,
+                            brightness=shape.brightness,
+                        )
+                    )
     return toolpaths
 
 
@@ -234,16 +256,108 @@ def generate_toolpaths_for_shapes(
     return toolpaths, scale_factor
 
 
-def write_toolpaths_to_gcode(toolpaths: Iterable[Toolpath], output_path: Path, config: SlicerConfig) -> int:
+@dataclass
+class ColorPlan:
+    ordered_colors: List[str]
+    groups: List[tuple[str, List[Toolpath]]]
+    usage_by_color: Dict[str, float]
+
+
+@dataclass
+class GcodeWriteResult:
+    line_count: int
+    color_order: List[str]
+
+
+def _hex_to_rgb(color: str) -> tuple[int, int, int]:
+    value = color.lstrip("#")
+    return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
+
+
+def _color_distance(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
+    dr = a[0] - b[0]
+    dg = a[1] - b[1]
+    db = a[2] - b[2]
+    return math.sqrt(dr * dr + dg * dg + db * db)
+
+
+def _toolpath_length(toolpath: Toolpath) -> float:
+    length = 0.0
+    points = list(toolpath.points)
+    for i in range(1, len(points)):
+        x1, y1 = points[i - 1]
+        x2, y2 = points[i]
+        length += math.hypot(x2 - x1, y2 - y1)
+    return length
+
+
+def _plan_color_sequence(toolpaths: List[Toolpath], config: SlicerConfig) -> ColorPlan | None:
+    printer = config.printer
+    if not printer.color_mode or not printer.available_colors:
+        return None
+
+    palette = printer.available_colors
+    palette_rgb = {color: _hex_to_rgb(color) for color in palette}
+    palette_order = {color: index for index, color in enumerate(palette)}
+
+    color_groups: Dict[str, List[Toolpath]] = {}
+    usage: Dict[str, float] = {}
+    fallback_rgb = (0, 0, 0)
+
+    for toolpath in toolpaths:
+        source = toolpath.source_color or fallback_rgb
+        best_color = min(palette, key=lambda color: _color_distance(source, palette_rgb[color]))
+        toolpath.assigned_color = best_color
+        color_groups.setdefault(best_color, []).append(toolpath)
+        usage[best_color] = usage.get(best_color, 0.0) + _toolpath_length(toolpath)
+
+    if not color_groups:
+        return None
+
+    ordered_colors = sorted(
+        color_groups.keys(),
+        key=lambda color: (usage.get(color, 0.0), palette_order.get(color, math.inf)),
+    )
+    groups = [(color, color_groups[color]) for color in ordered_colors]
+    return ColorPlan(ordered_colors=ordered_colors, groups=groups, usage_by_color=usage)
+
+
+def write_toolpaths_to_gcode(toolpaths: Iterable[Toolpath], output_path: Path, config: SlicerConfig) -> GcodeWriteResult:
+    toolpath_list = list(toolpaths)
     generator = GcodeGenerator(config.printer)
     generator.emit_header()
-    generator.draw_toolpaths(toolpaths, config.printer.feedrates)
+
+    color_plan = _plan_color_sequence(toolpath_list, config)
+    color_order: List[str] = []
+
+    if color_plan and color_plan.ordered_colors:
+        color_order = color_plan.ordered_colors
+        summary = " -> ".join(color_order)
+        generator.emit_comment(f"COLOR ORDER (least usage first): {summary}")
+        total_groups = len(color_plan.groups)
+        for index, (color, group_paths) in enumerate(color_plan.groups, start=1):
+            total_length = color_plan.usage_by_color.get(color, 0.0)
+            generator.emit_comment(
+                f"COLOR {index}/{total_groups}: {color} ({total_length:.1f} mm of drawing)"
+            )
+            for path in group_paths:
+                generator.draw_single_toolpath(path, config.printer.feedrates)
+            if index < total_groups:
+                generator.emit_comment("Filament change before next color")
+                pause_commands = config.printer.pause_gcode or ["M600"]
+                for command in pause_commands:
+                    generator.emit_command(command)
+    else:
+        generator.draw_toolpaths(toolpath_list, config.printer.feedrates)
+
     generator.emit_footer()
 
     gcode_lines = generator.generate()
     output_path.write_text("\n".join(gcode_lines) + "\n", encoding="utf-8")
     logger.info("Wrote %d G-code lines to %s", len(gcode_lines), output_path)
-    return len(gcode_lines)
+    if color_order:
+        logger.info("Color order: %s", " -> ".join(color_order))
+    return GcodeWriteResult(line_count=len(gcode_lines), color_order=color_order)
 
 
 def slice_svg_to_gcode(svg_path: Path, output_path: Path, config: SlicerConfig, preview: bool, preview_file: Path | None) -> None:
@@ -282,6 +396,20 @@ def build_argument_parser() -> argparse.ArgumentParser:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity",
     )
+    parser.add_argument(
+        "--color-mode",
+        dest="color_mode",
+        action="store_true",
+        help="Override the configuration to enable color palette mode.",
+    )
+    parser.add_argument(
+        "--bw-mode",
+        "--black-white",
+        dest="color_mode",
+        action="store_false",
+        help="Override the configuration to force black and white mode.",
+    )
+    parser.set_defaults(color_mode=None)
     return parser
 
 
@@ -292,6 +420,21 @@ def main(argv: List[str] | None = None) -> int:
     logging.basicConfig(level=getattr(logging, args.log_level.upper()), format="[%(levelname)s] %(message)s")
 
     config = load_config(args.config, profile=args.printer_profile)
+
+    if args.color_mode is not None:
+        config.printer.color_mode = bool(args.color_mode)
+        logger.info(
+            "Color mode override: %s",
+            "enabled" if config.printer.color_mode else "disabled",
+        )
+
+    if config.printer.color_mode and not config.printer.available_colors:
+        logger.error(
+            "Color mode is enabled but printer profile '%s' does not define any available colors. "
+            "Add 'available_colors' to the profile or disable color mode.",
+            config.printer.name,
+        )
+        return 1
 
     try:
         slice_svg_to_gcode(args.svg, args.output, config, args.preview, args.preview_file)

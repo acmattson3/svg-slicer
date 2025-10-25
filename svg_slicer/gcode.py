@@ -13,6 +13,9 @@ Polyline = Sequence[Point]
 class Toolpath:
     points: Polyline
     tag: str = "infill"
+    source_color: tuple[int, int, int] | None = None
+    assigned_color: str | None = None
+    brightness: float | None = None
 
 
 class GcodeGenerator:
@@ -67,28 +70,46 @@ class GcodeGenerator:
         for line in self.printer.end_gcode:
             self._emit(line)
 
-    def draw_toolpaths(self, toolpaths: Iterable[Toolpath], feedrates: Feedrates) -> None:
+    def emit_comment(self, text: str) -> None:
+        self._emit(f"; {text}")
+
+    def emit_command(self, line: str) -> None:
+        self._emit(line)
+
+    def draw_single_toolpath(self, toolpath: Toolpath, feedrates: Feedrates) -> None:
+        points = list(toolpath.points)
+        if len(points) < 2:
+            return
         draw_feed = feedrates.draw_feedrate
         travel_feed = feedrates.travel_feedrate
         z_feed = feedrates.z_feedrate
         draw_height = self.printer.z_draw
         travel_height = self.printer.z_travel
 
+        start = points[0]
+        self._set_z(travel_height, z_feed)
+        self._rapid_move(start, travel_feed)
+        self._set_z(draw_height, z_feed)
+        for point in points[1:]:
+            self._linear_move(point, draw_feed)
+        self._set_z(travel_height, z_feed)
+
+    def draw_toolpaths(self, toolpaths: Iterable[Toolpath], feedrates: Feedrates) -> None:
         for toolpath in toolpaths:
-            points = list(toolpath.points)
-            if len(points) < 2:
-                continue
-            start = points[0]
-            self._set_z(travel_height, z_feed)
-            self._rapid_move(start, travel_feed)
-            self._set_z(draw_height, z_feed)
-            for point in points[1:]:
-                self._linear_move(point, draw_feed)
-            self._set_z(travel_height, z_feed)
+            self.draw_single_toolpath(toolpath, feedrates)
 
     def generate(self) -> List[str]:
         return self._gcode
 
 
-def toolpaths_from_polylines(polylines: Iterable[Polyline], tag: str = "infill") -> List[Toolpath]:
-    return [Toolpath(points=tuple(polyline), tag=tag) for polyline in polylines if len(polyline) >= 2]
+def toolpaths_from_polylines(
+    polylines: Iterable[Polyline],
+    tag: str = "infill",
+    source_color: tuple[int, int, int] | None = None,
+    brightness: float | None = None,
+) -> List[Toolpath]:
+    return [
+        Toolpath(points=tuple(polyline), tag=tag, source_color=source_color, brightness=brightness)
+        for polyline in polylines
+        if len(polyline) >= 2
+    ]

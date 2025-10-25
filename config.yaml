@@ -18,6 +18,24 @@ printers:
       draw: 175.0
       travel: 175.0
       z: 20.0
+    color_mode: true
+    available_colors:
+      - "#000000" # Black
+      - "#9d5352" # Red
+      - "#c7663e" # Orange
+      - "#baa961" # Yellow
+      - "#87bd5c" # Yellow-Green
+      - "#4bbd5d" # Green
+      - "#4dd1c1" # Cyan
+      - "#292f7d" # Blue
+      - "#69409c" # Purple
+      - "#bf4e95" # Pink
+    pause_gcode:
+      - "G91 ; relative positioning"
+      - "G1 Z20 F600 ; lift pen safely"
+      - "G90 ; absolute positioning"
+      - "G1 X0.000 Y0.000 F10500 ; move to park for swap"
+      - "M0 Change pen and press to resume"
     start_gcode:
       - G21 ; use millimeters
       - G90 ; absolute positioning
@@ -46,6 +64,14 @@ printers:
       draw: 400.0
       travel: 400.0
       z: 20.0
+    color_mode: false
+    available_colors:
+      - "#000000"
+      - "#FF5500"
+      - "#FFD700"
+      - "#00AEEF"
+    pause_gcode:
+      - "M600"
     start_gcode:
       - G21 ; use millimeters
       - G90 ; absolute positioning

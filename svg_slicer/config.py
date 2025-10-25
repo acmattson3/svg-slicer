@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import pathlib
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 import yaml
@@ -41,6 +42,9 @@ class PrinterConfig:
     feedrates: Feedrates
     start_gcode: List[str]
     end_gcode: List[str]
+    color_mode: bool = False
+    available_colors: List[str] = field(default_factory=list)
+    pause_gcode: List[str] = field(default_factory=lambda: ["M600"])
 
     @property
     def printable_width(self) -> float:
@@ -90,6 +94,22 @@ class ConfigError(Exception):
     """Raised when configuration values are missing or invalid."""
 
 
+_HEX_COLOR_RE = re.compile(r"^[0-9A-Fa-f]{6}$")
+
+
+def _normalize_hex_color(value: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"Palette entry must be a string containing a hex color, got {type(value).__name__}"
+        )
+    stripped = value.strip()
+    if stripped.startswith("#"):
+        stripped = stripped[1:]
+    if len(stripped) != 6 or not _HEX_COLOR_RE.match(stripped):
+        raise ConfigError(f"Invalid hex color '{value}'. Expected format '#RRGGBB'.")
+    return f"#{stripped.upper()}"
+
+
 def _require(mapping: Dict[str, Any], key: str) -> Any:
     if key not in mapping:
         raise ConfigError(f"Missing required configuration key: {key}")
@@ -110,6 +130,25 @@ def _parse_printer_config(printer_raw: Dict[str, Any], fallback_name: str | None
 
     printer_name = str(printer_raw.get("name", fallback_name or "PenPlotter"))
 
+    color_mode = bool(printer_raw.get("color_mode", False))
+    palette_raw = printer_raw.get("available_colors", [])
+    if palette_raw is None:
+        palette_raw = []
+    if not isinstance(palette_raw, list):
+        raise ConfigError("'available_colors' must be a list of hex color strings.")
+    available_colors = [_normalize_hex_color(entry) for entry in palette_raw]
+    if color_mode and not available_colors:
+        raise ConfigError("Color mode is enabled but 'available_colors' is empty.")
+
+    pause_gcode_raw = printer_raw.get("pause_gcode", ["M600"])
+    if pause_gcode_raw is None:
+        pause_gcode_raw = []
+    if not isinstance(pause_gcode_raw, list):
+        raise ConfigError("'pause_gcode' must be a list of G-code commands.")
+    pause_gcode = [str(line) for line in pause_gcode_raw if str(line).strip()]
+    if not pause_gcode:
+        pause_gcode.append("M600")
+
     return PrinterConfig(
         name=printer_name,
         bed_width=float(_require(bed, "width")),
@@ -124,6 +163,9 @@ def _parse_printer_config(printer_raw: Dict[str, Any], fallback_name: str | None
         feedrates=feedrates,
         start_gcode=list(printer_raw.get("start_gcode", [])),
         end_gcode=list(printer_raw.get("end_gcode", [])),
+        color_mode=color_mode,
+        available_colors=available_colors,
+        pause_gcode=pause_gcode,
     )
 
 

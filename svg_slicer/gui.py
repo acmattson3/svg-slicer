@@ -40,6 +40,9 @@ try:
         QWidget,
         QComboBox,
         QDoubleSpinBox,
+        QCheckBox,
+        QStyle,
+        QStyleOptionGraphicsItem,
     )
 except ImportError as exc:  # pragma: no cover - GUI dependencies are optional for tests
     raise RuntimeError(
@@ -154,7 +157,7 @@ class LoadedModel:
         translate_y = offset_y + (self.position[1] if include_position else 0.0)
 
         transformed: List[ShapeGeometry] = []
-        for geom, brightness, stroke_width in staged or []:
+        for geom, brightness, stroke_width, color in staged or []:
             if translate_x != 0.0 or translate_y != 0.0:
                 geom = shapely_translate(geom, xoff=translate_x, yoff=translate_y)
             transformed.append(
@@ -162,6 +165,7 @@ class LoadedModel:
                     geometry=geom,
                     brightness=brightness,
                     stroke_width=stroke_width,
+                    color=color,
                 )
             )
 
@@ -178,8 +182,13 @@ class LoadedModel:
         scale: float,
         rotation: float,
         capture_shapes: bool,
-    ) -> Tuple[Optional[List[Tuple[Any, float, Optional[float]]]], Tuple[float, float, float, float]]:
-        staged: Optional[List[Tuple[Any, float, Optional[float]]]] = [] if capture_shapes else None
+    ) -> Tuple[
+        Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]]]]],
+        Tuple[float, float, float, float],
+    ]:
+        staged: Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]]]]] = (
+            [] if capture_shapes else None
+        )
 
         min_x = math.inf
         min_y = math.inf
@@ -208,6 +217,7 @@ class LoadedModel:
                         geom,
                         shape.brightness,
                         None if shape.stroke_width is None else shape.stroke_width * scale,
+                        shape.color,
                     )
                 )
 
@@ -269,6 +279,36 @@ def _geometry_to_path(path: QPainterPath, geometry) -> None:  # type: ignore[no-
             _geometry_to_path(path, part)
 
 
+def _clamp(value: float, *, lower: float = 0.0, upper: float = 1.0) -> float:
+    return min(max(value, lower), upper)
+
+
+def _brightness_to_gray(brightness: float | None) -> int:
+    if brightness is None:
+        return 150
+    return int(round(_clamp(brightness) * 255))
+
+
+def _shape_to_qcolor(shape: ShapeGeometry) -> QColor:
+    if shape.color is not None:
+        r, g, b = shape.color
+        return QColor(int(r), int(g), int(b))
+    gray = _brightness_to_gray(shape.brightness)
+    return QColor(gray, gray, gray)
+
+
+def _toolpath_to_qcolor(toolpath: Toolpath) -> QColor:
+    if toolpath.assigned_color:
+        qc = QColor(toolpath.assigned_color)
+        if qc.isValid():
+            return qc
+    if toolpath.source_color is not None:
+        r, g, b = toolpath.source_color
+        return QColor(int(r), int(g), int(b))
+    gray = _brightness_to_gray(toolpath.brightness)
+    return QColor(gray, gray, gray)
+
+
 def build_model_path(shapes: Sequence[ShapeGeometry]) -> QPainterPath:
     painter_path = QPainterPath()
     for shape in shapes:
@@ -289,6 +329,7 @@ class ModelGraphicsItem(QGraphicsPathItem):
         self.model = model
         self._bed_rect = bed_rect
         self._moved_callback = moved_callback
+        self._color_paths: List[tuple[QColor, QPainterPath]] = []
 
         self.setFlags(
             QGraphicsItem.ItemIsSelectable
@@ -297,25 +338,63 @@ class ModelGraphicsItem(QGraphicsPathItem):
         )
         self.setZValue(1)
 
-        pen = QPen(QColor("#205f7a"))
-        pen.setWidthF(0)
-        pen.setCosmetic(True)
-        self.setPen(pen)
-
-        brush = QColor("#74b6d6")
-        brush.setAlpha(70)
-        self.setBrush(brush)
+        self.setPen(Qt.NoPen)
+        self.setBrush(Qt.NoBrush)
 
         self.refresh_path()
         self.setPos(model.position[0], model.position[1])
 
     def refresh_path(self) -> None:
         shapes = self.model.display_shapes()
+        color_paths: dict[tuple[int, int, int, int], QPainterPath] = {}
+
+        for shape in shapes:
+            if shape.geometry.is_empty:
+                continue
+            shape_path = QPainterPath()
+            _geometry_to_path(shape_path, shape.geometry)
+            if shape_path.isEmpty():
+                continue
+            qcolor = _shape_to_qcolor(shape)
+            key = (qcolor.red(), qcolor.green(), qcolor.blue(), qcolor.alpha())
+            color_paths.setdefault(key, QPainterPath()).addPath(shape_path)
+
+        self._color_paths = [(QColor(r, g, b, a), path) for (r, g, b, a), path in color_paths.items()]
+
         painter_path = build_model_path(shapes)
         self.setPath(painter_path)
+        self.update()
 
     def set_bed_rect(self, bed_rect: QRectF) -> None:
         self._bed_rect = bed_rect
+
+    def paint(self, painter, option: QStyleOptionGraphicsItem, widget=None) -> None:  # type: ignore[override]
+        if not self._color_paths:
+            super().paint(painter, option, widget)
+            return
+
+        painter.save()
+        for color, path in self._color_paths:
+            pen = QPen(color)
+            pen.setWidthF(0)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+
+            brush_color = QColor(color)
+            brush_color.setAlpha(60)
+            painter.setBrush(brush_color)
+            painter.drawPath(path)
+
+        if option.state & QStyle.State_Selected:
+            highlight_pen = QPen(QColor("#ff9500"))
+            highlight_pen.setWidthF(0)
+            highlight_pen.setCosmetic(True)
+            highlight_pen.setStyle(Qt.DashLine)
+            painter.setPen(highlight_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(self.path())
+
+        painter.restore()
 
     def itemChange(self, change, value):  # type: ignore[override]
         if change == QGraphicsItem.ItemPositionChange and self._bed_rect is not None:
@@ -477,10 +556,6 @@ class BuildPlateView(QGraphicsView):
     def update_toolpaths(self, toolpaths: Iterable[Toolpath]) -> None:
         self.clear_toolpaths()
 
-        pen = QPen(QColor("#2c6e91"))
-        pen.setWidthF(0)
-        pen.setCosmetic(True)
-
         for toolpath in toolpaths:
             points = list(toolpath.points)
             if len(points) < 2:
@@ -489,6 +564,10 @@ class BuildPlateView(QGraphicsView):
             painter_path.moveTo(points[0][0], points[0][1])
             for x, y in points[1:]:
                 painter_path.lineTo(x, y)
+            color = _toolpath_to_qcolor(toolpath)
+            pen = QPen(color)
+            pen.setWidthF(0)
+            pen.setCosmetic(True)
             item = self._scene.addPath(painter_path, pen)
             item.setZValue(4)
             self._toolpath_items.append(item)
@@ -937,16 +1016,29 @@ class SettingsTab(QWidget):
         printer_form.addRow("Feedrate travel (mm/s)", self.feedrate_travel_spin)
         printer_form.addRow("Feedrate Z (mm/s)", self.feedrate_z_spin)
 
+        self.color_mode_checkbox = QCheckBox("Enable color mode")
+        printer_form.addRow("Color mode", self.color_mode_checkbox)
+
+        self.available_colors_edit = QLineEdit()
+        self.available_colors_edit.setPlaceholderText("#000000, #FF0000, #00FF00")
+        self._set_wide(self.available_colors_edit)
+        printer_form.addRow("Available colors", self.available_colors_edit)
+
         self.start_gcode_edit = QPlainTextEdit()
         self.start_gcode_edit.setPlaceholderText("One G-code command per line")
         self.end_gcode_edit = QPlainTextEdit()
         self.end_gcode_edit.setPlaceholderText("One G-code command per line")
+        self.pause_gcode_edit = QPlainTextEdit()
+        self.pause_gcode_edit.setPlaceholderText("Commands executed between colour changes (e.g. manual pause script)")
         self._set_wide(self.start_gcode_edit, minimum_width=260, vertical_policy=QSizePolicy.Expanding)
         self._set_wide(self.end_gcode_edit, minimum_width=260, vertical_policy=QSizePolicy.Expanding)
+        self._set_wide(self.pause_gcode_edit, minimum_width=260, vertical_policy=QSizePolicy.Expanding)
         self.start_gcode_edit.setMinimumHeight(90)
         self.end_gcode_edit.setMinimumHeight(90)
+        self.pause_gcode_edit.setMinimumHeight(90)
         printer_form.addRow("Start G-code", self.start_gcode_edit)
         printer_form.addRow("End G-code", self.end_gcode_edit)
+        printer_form.addRow("Pause G-code", self.pause_gcode_edit)
 
         layout.addWidget(printer_group)
 
@@ -1069,8 +1161,11 @@ class SettingsTab(QWidget):
         self.feedrate_draw_spin.setValue(printer.feedrates.draw_mm_s)
         self.feedrate_travel_spin.setValue(printer.feedrates.travel_mm_s)
         self.feedrate_z_spin.setValue(printer.feedrates.z_mm_s)
+        self.color_mode_checkbox.setChecked(printer.color_mode)
+        self.available_colors_edit.setText(", ".join(printer.available_colors))
         self.start_gcode_edit.setPlainText("\n".join(printer.start_gcode))
         self.end_gcode_edit.setPlainText("\n".join(printer.end_gcode))
+        self.pause_gcode_edit.setPlainText("\n".join(printer.pause_gcode))
 
         infill = config.infill
         self.infill_spacing_spin.setValue(infill.base_spacing)
@@ -1096,6 +1191,15 @@ class SettingsTab(QWidget):
         if not self._config:
             raise RuntimeError("Configuration has not been initialised.")
 
+        color_mode = self.color_mode_checkbox.isChecked()
+        palette = self._parse_palette(self.available_colors_edit.text())
+        if color_mode and not palette:
+            raise ValueError("Color mode requires at least one available color.")
+
+        pause_lines = [line for line in self.pause_gcode_edit.toPlainText().splitlines() if line.strip()]
+        if not pause_lines:
+            pause_lines = ["M600"]
+
         printer = PrinterConfig(
             name=self.printer_name_edit.text().strip() or self._config.printer.name,
             bed_width=self.bed_width_spin.value(),
@@ -1114,6 +1218,9 @@ class SettingsTab(QWidget):
             ),
             start_gcode=[line for line in self.start_gcode_edit.toPlainText().splitlines() if line.strip()],
             end_gcode=[line for line in self.end_gcode_edit.toPlainText().splitlines() if line.strip()],
+            color_mode=color_mode,
+            available_colors=palette,
+            pause_gcode=pause_lines,
         )
 
         try:
@@ -1165,6 +1272,20 @@ class SettingsTab(QWidget):
         if not angles:
             angles.append(0.0)
         return angles
+
+    @staticmethod
+    def _parse_palette(text: str) -> List[str]:
+        stripped = text.replace("\n", ",")
+        entries: List[str] = []
+        for chunk in stripped.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            value = chunk[1:] if chunk.startswith("#") else chunk
+            if len(value) != 6 or any(c not in "0123456789abcdefABCDEF" for c in value):
+                raise ValueError(f"Invalid hex color '{chunk}'. Expected format like #RRGGBB.")
+            entries.append(f"#{value.upper()}")
+        return entries
 
     def _on_apply_clicked(self) -> None:
         try:
@@ -1281,7 +1402,12 @@ class MainWindow(QMainWindow):
         bounds = [shape.geometry.bounds for shape in shapes if not shape.geometry.is_empty]
         if not bounds:
             normalized = [
-                ShapeGeometry(geometry=shape.geometry, brightness=shape.brightness, stroke_width=shape.stroke_width)
+                ShapeGeometry(
+                    geometry=shape.geometry,
+                    brightness=shape.brightness,
+                    stroke_width=shape.stroke_width,
+                    color=shape.color,
+                )
                 for shape in shapes
             ]
             return normalized, 0.0, 0.0
@@ -1303,6 +1429,7 @@ class MainWindow(QMainWindow):
                     geometry=geom,
                     brightness=shape.brightness,
                     stroke_width=shape.stroke_width,
+                    color=shape.color,
                 )
             )
         return normalized_shapes, width, height
@@ -1671,7 +1798,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-            line_count = write_toolpaths_to_gcode(toolpaths, output_path, self.config)
+            result = write_toolpaths_to_gcode(toolpaths, output_path, self.config)
         except Exception as exc:
             progress.close()
             QMessageBox.critical(self, "Slice Failed", f"Could not generate G-code:\n{exc}")
@@ -1683,9 +1810,16 @@ class MainWindow(QMainWindow):
 
         self._current_toolpaths = toolpaths
         self.prepare_tab.update_toolpaths(toolpaths)
-        self.prepare_tab.set_status(f"G-code saved to {output_path}")
-        self.statusBar().showMessage(f"G-code saved to {output_path}", 5000)
-        self._append_log(f"[INFO] Wrote {line_count} G-code lines to {output_path}.")
+
+        status_message = f"G-code saved to {output_path}"
+        if result.color_order:
+            colors_formatted = " -> ".join(result.color_order)
+            status_message += f" | Color order: {colors_formatted}"
+            self._append_log(f"[INFO] Color order: {colors_formatted}")
+
+        self.prepare_tab.set_status(status_message)
+        self.statusBar().showMessage(status_message, 5000)
+        self._append_log(f"[INFO] Wrote {result.line_count} G-code lines to {output_path}.")
 
     def _apply_new_config(self, config: SlicerConfig) -> None:
         self.config = config
@@ -1784,6 +1918,9 @@ class MainWindow(QMainWindow):
                 "travel": config.printer.feedrates.travel_mm_s,
                 "z": config.printer.feedrates.z_mm_s,
             },
+            "color_mode": config.printer.color_mode,
+            "available_colors": list(config.printer.available_colors),
+            "pause_gcode": list(config.printer.pause_gcode),
         }
         if config.printer.start_gcode:
             printer["start_gcode"] = list(config.printer.start_gcode)

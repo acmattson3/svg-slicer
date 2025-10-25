@@ -23,6 +23,7 @@ class ShapeGeometry:
     geometry: BaseGeometry
     brightness: float
     stroke_width: float | None = None
+    color: tuple[int, int, int] | None = None
 
 
 def _shoelace_area(points: Sequence[Tuple[float, float]]) -> float:
@@ -169,6 +170,12 @@ def _color_to_brightness(color: Color | None) -> float:
     return max(0.0, min(1.0, brightness))
 
 
+def _color_to_rgb(color: Color | None) -> tuple[int, int, int] | None:
+    if not color or getattr(color, "alpha", 0) == 0:
+        return None
+    return (int(color.red), int(color.green), int(color.blue))
+
+
 def _path_to_lines(path: Path, tolerance: float) -> List[List[Tuple[float, float]]]:
     approximated = Path(path)
     approximated.approximate_arcs_with_cubics(error=tolerance / 10.0 if tolerance else 0.1)
@@ -255,6 +262,7 @@ def _resolve_visibility(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]:
                     geometry=polygon,
                     brightness=shape.brightness,
                     stroke_width=shape.stroke_width,
+                    color=shape.color,
                 )
             )
             polys_for_union.append(polygon)
@@ -313,6 +321,7 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
                 polygons = _apply_clip(polygons, clip_geom)
                 if polygons:
                     brightness = _color_to_brightness(fill_color)
+                    rgb = _color_to_rgb(fill_color)
                     for polygon in polygons:
                         polygon = polygon.buffer(0)
                         if polygon.is_empty or polygon.area <= 0:
@@ -322,6 +331,7 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
                                 geometry=polygon,
                                 brightness=brightness,
                                 stroke_width=None,
+                                color=rgb,
                             )
                         )
 
@@ -341,6 +351,7 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
                     stroke_polygons = _apply_clip(stroke_polygons, clip_geom)
                     if stroke_polygons:
                         brightness = _color_to_brightness(stroke_color)
+                        rgb = _color_to_rgb(stroke_color)
                         for polygon in stroke_polygons:
                             polygon = polygon.buffer(0)
                             if polygon.is_empty or polygon.area <= 0:
@@ -350,6 +361,7 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
                                     geometry=polygon,
                                     brightness=brightness,
                                     stroke_width=stroke_w,
+                                    color=rgb,
                                 )
                             )
 
@@ -388,6 +400,7 @@ def fit_shapes_to_bed(shapes: List[ShapeGeometry], printer: PrinterConfig) -> Tu
                 geometry=geom,
                 brightness=shape.brightness,
                 stroke_width=stroke_width,
+                color=shape.color,
             )
         )
 
