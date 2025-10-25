@@ -103,10 +103,12 @@ def _perimeter_glide_path(
     start_geom = ShapelyPoint(start)
     end_geom = ShapelyPoint(end)
     best_path: Polyline | None = None
-    best_length = float("inf")
+    best_arc_length = float("inf")
+    best_actual_length = float("inf")
+    best_point_count = math.inf
 
     for loop in loops:
-        if loop.is_empty or loop.length <= 0:
+        if loop.is_empty:
             continue
         start_dist = loop.project(start_geom)
         nearest_start = loop.interpolate(start_dist)
@@ -116,25 +118,54 @@ def _perimeter_glide_path(
         nearest_end = loop.interpolate(end_dist)
         if end_geom.distance(nearest_end) > check_tolerance:
             continue
-        forward = _loop_section(loop, start_dist, end_dist)
-        backward = list(reversed(_loop_section(loop, end_dist, start_dist)))
-        for path in (forward, backward):
-            if not path:
+        loop_length = loop.length
+        if loop_length <= 0:
+            continue
+        forward_length = (end_dist - start_dist) % loop_length
+        backward_length = (start_dist - end_dist) % loop_length
+        candidates: List[Tuple[float, float, int, Polyline]] = []
+
+        for direction, arc_length in sorted(
+            (("forward", forward_length), ("backward", backward_length)),
+            key=lambda item: item[1],
+        ):
+            if arc_length < 1e-12 and _point_distance(start, end) <= 1e-9:
                 continue
-            path[0] = start
-            path[-1] = end
-            deduped: Polyline = [path[0]]
-            for point in path[1:]:
+            if direction == "forward":
+                raw_path = _loop_section(loop, start_dist, end_dist)
+            else:
+                raw_path = list(reversed(_loop_section(loop, end_dist, start_dist)))
+            if not raw_path:
+                continue
+            raw_path[0] = start
+            raw_path[-1] = end
+            deduped: Polyline = [raw_path[0]]
+            for point in raw_path[1:]:
                 if _point_distance(point, deduped[-1]) > 1e-9:
                     deduped.append(point)
             if len(deduped) < 2:
                 continue
-            length_value = sum(
-                _point_distance(deduped[i - 1], deduped[i]) for i in range(1, len(deduped))
+            actual_length = sum(
+                _point_distance(deduped[i - 1], deduped[i])
+                for i in range(1, len(deduped))
             )
-            if length_value < best_length - 1e-9:
-                best_length = length_value
-                best_path = deduped
+            candidates.append((arc_length, actual_length, len(deduped), deduped))
+
+        for arc_length, actual_length, point_count, path in candidates:
+            if arc_length < best_arc_length - 1e-9:
+                best_path = path
+                best_arc_length = arc_length
+                best_actual_length = actual_length
+                best_point_count = point_count
+            elif abs(arc_length - best_arc_length) <= 1e-9:
+                if actual_length < best_actual_length - 1e-9 or (
+                    abs(actual_length - best_actual_length) <= 1e-9
+                    and point_count < best_point_count
+                ):
+                    best_path = path
+                    best_arc_length = arc_length
+                    best_actual_length = actual_length
+                    best_point_count = point_count
     return best_path
 
 
