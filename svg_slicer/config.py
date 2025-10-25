@@ -67,6 +67,7 @@ class InfillConfig:
 class SamplingConfig:
     segment_tolerance: float
     outline_simplify_tolerance: float
+    curve_detail_scale: float = 1.0
 
 
 @dataclass
@@ -233,6 +234,7 @@ def load_config(path: str | pathlib.Path, profile: str | None = None) -> SlicerC
                 sampling_raw.get("segment_length_tolerance_mm", 0.5),
             )
         ),
+        curve_detail_scale=float(sampling_raw.get("curve_detail_scale", 1.0)),
     )
 
     perimeter_raw = raw.get("perimeter", {})

@@ -93,7 +93,8 @@ perimeter:
   density: 1.0
   min_fill_width_mm: 0.8
 sampling:
-  segment_length_tolerance_mm: 0.5
-  outline_simplify_tolerance_mm: 1.0
+  segment_length_tolerance_mm: 0.4
+  outline_simplify_tolerance_mm: 0.4
+  curve_detail_scale: 3.0
 rendering:
   preview_line_width_mm: 0.45

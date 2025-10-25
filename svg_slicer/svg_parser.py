@@ -4,13 +4,15 @@ import logging
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
+from shapely.affinity import affine_transform as shapely_affine_transform
 from shapely.affinity import scale as shapely_scale
 from shapely.affinity import translate as shapely_translate
 from shapely.geometry import GeometryCollection, LineString, Polygon
-from shapely.ops import unary_union
-from shapely.ops import unary_union
 from shapely.geometry.base import BaseGeometry
-from svgelements import Arc, ClipPath, Color, Move, Path, SVG
+from shapely.ops import unary_union
+from svgelements import Arc, ClipPath, Color, Move, Path, SVG, Text
+from matplotlib.font_manager import FontProperties
+from matplotlib.textpath import TextPath
 
 from .config import PrinterConfig, SamplingConfig
 
@@ -35,10 +37,12 @@ def _shoelace_area(points: Sequence[Tuple[float, float]]) -> float:
     return area / 2.0
 
 
-def _path_to_polygons(path: Path, tolerance: float) -> List[Polygon]:
+def _path_to_polygons(path: Path, tolerance: float, detail_scale: float) -> List[Polygon]:
     # Ensure arcs are approximated by cubic curves for sampling stability.
     approximated = Path(path)
-    approximated.approximate_arcs_with_cubics(error=tolerance / 10.0 if tolerance else 0.1)
+    detail_multiplier = detail_scale if detail_scale and detail_scale > 0 else 1.0
+    arc_error_base = tolerance / 10.0 if tolerance else 0.1
+    approximated.approximate_arcs_with_cubics(error=arc_error_base / detail_multiplier)
 
     rings: List[List[Tuple[float, float]]] = []
     current: List[Tuple[float, float]] = []
@@ -51,12 +55,14 @@ def _path_to_polygons(path: Path, tolerance: float) -> List[Polygon]:
             continue
         if isinstance(segment, Arc):
             # After conversion arcs should be represented as cubics, but guard anyway.
-            approximated.approximate_arcs_with_cubics(error=tolerance / 10.0 if tolerance else 0.1)
-            return _path_to_polygons(approximated, tolerance)
-        length = segment.length(error=tolerance / 10.0 if tolerance else 0.01)
+            approximated.approximate_arcs_with_cubics(error=arc_error_base / detail_multiplier)
+            return _path_to_polygons(approximated, tolerance, detail_scale)
+        length_error_base = tolerance / 10.0 if tolerance else 0.01
+        length = segment.length(error=length_error_base / detail_multiplier)
         if length == 0:
             continue
-        steps = max(int(length / max(tolerance, 0.1)), 1)
+        step_denominator = max(tolerance, 0.1)
+        steps = max(int(length / step_denominator * detail_multiplier), 1)
         # Include start point if this is the first segment in the current ring.
         if not current:
             start_point = segment.start
@@ -153,7 +159,9 @@ def _build_clip_paths(svg: SVG, sampling: SamplingConfig, svg_path: str) -> dict
             if not path_data:
                 continue
             path = Path(path_data)
-            polygons.extend(_path_to_polygons(path, sampling.segment_tolerance))
+            polygons.extend(
+                _path_to_polygons(path, sampling.segment_tolerance, sampling.curve_detail_scale)
+            )
         if not polygons:
             continue
         geom = unary_union([poly.buffer(0) for poly in polygons if not poly.is_empty])
@@ -176,9 +184,198 @@ def _color_to_rgb(color: Color | None) -> tuple[int, int, int] | None:
     return (int(color.red), int(color.green), int(color.blue))
 
 
-def _path_to_lines(path: Path, tolerance: float) -> List[List[Tuple[float, float]]]:
+def _value_to_float(value) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (list, tuple)):
+        return _value_to_float(value[0] if value else 0.0)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        if hasattr(value, "value"):
+            try:
+                return float(value.value)
+            except (TypeError, ValueError):
+                try:
+                    return float(value.value())  # type: ignore[operator]
+                except Exception:
+                    return 0.0
+    return 0.0
+
+
+def _matrix_to_affine_params(matrix) -> list[float]:
+    if matrix is None:
+        return [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    a = getattr(matrix, "a", 1.0)
+    b = getattr(matrix, "b", 0.0)
+    c = getattr(matrix, "c", 0.0)
+    d = getattr(matrix, "d", 1.0)
+    e = getattr(matrix, "e", 0.0)
+    f = getattr(matrix, "f", 0.0)
+    return [a, c, b, d, e, f]
+
+
+def _normalize_font_style(style: str | None) -> str:
+    if not style:
+        return "normal"
+    style_lower = str(style).strip().lower()
+    if style_lower in {"normal", "italic", "oblique"}:
+        return style_lower
+    return "normal"
+
+
+def _normalize_font_weight(weight) -> str | int:
+    if weight is None:
+        return "normal"
+    if isinstance(weight, (int, float)):
+        return int(weight)
+    weight_str = str(weight).strip().lower()
+    if weight_str.isdigit():
+        return int(weight_str)
+    valid = {
+        "ultralight",
+        "light",
+        "normal",
+        "regular",
+        "book",
+        "medium",
+        "semibold",
+        "demibold",
+        "bold",
+        "heavy",
+        "black",
+    }
+    if weight_str in valid:
+        return weight_str
+    return "normal"
+
+
+def _font_properties_for_text(element: Text, font_size: float) -> FontProperties:
+    family = getattr(element, "font_family", None)
+    if isinstance(family, str):
+        families = [f.strip().strip("'\"") for f in family.split(",") if f.strip()]
+    elif isinstance(family, (list, tuple)):
+        families = [str(f).strip().strip("'\"") for f in family if str(f).strip()]
+    else:
+        families = []
+    style = _normalize_font_style(getattr(element, "font_style", None))
+    weight = _normalize_font_weight(getattr(element, "font_weight", None))
+    return FontProperties(
+        family=families or None,
+        style=style,
+        weight=weight,
+        size=font_size,
+    )
+
+
+def _text_to_polygons(element: Text, tolerance: float) -> List[Polygon]:
+    text_content = getattr(element, "text", None)
+    if not text_content:
+        return []
+    font_size_value = getattr(element, "font_size", None)
+    font_size = _value_to_float(font_size_value) or 16.0
+    if font_size <= 0:
+        return []
+
+    try:
+        font_props = _font_properties_for_text(element, font_size)
+        text_path = TextPath(
+            (0, 0),
+            text_content,
+            prop=font_props,
+            size=font_size,
+            usetex=False,
+        )
+    except Exception as exc:  # pragma: no cover - backend/font issues
+        logger.debug("Unable to convert text '%s' to path: %s", text_content, exc)
+        return []
+
+    bbox = text_path.get_extents()
+    text_width = bbox.width if bbox.width is not None else 0.0
+    anchor = getattr(element, "anchor", None)
+    x_base = _value_to_float(getattr(element, "x", 0.0))
+    dx = _value_to_float(getattr(element, "dx", 0.0))
+    y_base = _value_to_float(getattr(element, "y", 0.0))
+    dy = _value_to_float(getattr(element, "dy", 0.0))
+    x_reference = bbox.x0
+    if anchor in {"middle", "center"}:
+        x_reference = bbox.x0 + text_width / 2.0
+    elif anchor in {"end", "right"}:
+        x_reference = bbox.x1
+    x_offset = x_base + dx - x_reference
+    y_offset = y_base + dy
+
+    polygons_data = text_path.to_polygons(closed_only=True)
+    if not polygons_data:
+        return []
+
+    loops: List[Polygon] = []
+    for coords in polygons_data:
+        if len(coords) < 3:
+            continue
+        transformed: List[Tuple[float, float]] = []
+        for x_val, y_val in coords:
+            transformed.append((x_val + x_offset, y_offset - y_val))
+        if transformed[0] != transformed[-1]:
+            transformed.append(transformed[0])
+        polygon = Polygon(transformed)
+        if polygon.is_empty or polygon.area == 0:
+            continue
+        loops.append(polygon)
+
+    if not loops:
+        return []
+
+    loops.sort(key=lambda poly: poly.area, reverse=True)
+    structures: List[dict] = []
+    processed: List[dict] = []
+    for poly in loops:
+        containers = [item for item in processed if item["poly"].contains(poly)]
+        depth = len(containers)
+        if depth % 2 == 0:
+            entry = {"poly": poly, "holes": []}
+            structures.append(entry)
+            processed.append({"poly": poly, "role": "shell", "ref": entry})
+        else:
+            shell_containers = [item for item in containers if item.get("role") == "shell"]
+            if shell_containers:
+                shell_containers.sort(key=lambda item: item["poly"].area)
+                shell_containers[-1]["ref"]["holes"].append(poly)
+            processed.append({"poly": poly, "role": "hole"})
+
+    polygons: List[Polygon] = []
+    for structure in structures:
+        shell = structure["poly"]
+        holes = [list(hole.exterior.coords) for hole in structure["holes"]]
+        polygon = Polygon(shell.exterior.coords, holes)
+        if polygon.is_empty or polygon.area <= 0:
+            continue
+        polygons.append(polygon)
+
+    matrix = getattr(element, "transform", None)
+    if matrix is not None:
+        is_identity = getattr(matrix, "is_identity", None)
+        identity = False
+        if callable(is_identity):
+            identity = is_identity()
+        if not identity:
+            params = _matrix_to_affine_params(matrix)
+            transformed_polygons: List[Polygon] = []
+            for polygon in polygons:
+                transformed = shapely_affine_transform(polygon, params)
+                if transformed.is_empty or transformed.area <= 0:
+                    continue
+                transformed_polygons.append(transformed)
+            polygons = transformed_polygons
+
+    return polygons
+
+
+def _path_to_lines(path: Path, tolerance: float, detail_scale: float) -> List[List[Tuple[float, float]]]:
     approximated = Path(path)
-    approximated.approximate_arcs_with_cubics(error=tolerance / 10.0 if tolerance else 0.1)
+    detail_multiplier = detail_scale if detail_scale and detail_scale > 0 else 1.0
+    arc_error_base = tolerance / 10.0 if tolerance else 0.1
+    approximated.approximate_arcs_with_cubics(error=arc_error_base / detail_multiplier)
 
     lines: List[List[Tuple[float, float]]] = []
     current: List[Tuple[float, float]] = []
@@ -189,10 +386,11 @@ def _path_to_lines(path: Path, tolerance: float) -> List[List[Tuple[float, float
                 lines.append(current)
             current = [(segment.end.real, segment.end.imag)]
             continue
-        length = segment.length(error=tolerance / 10.0 if tolerance else 0.01)
+        length_error_base = tolerance / 10.0 if tolerance else 0.01
+        length = segment.length(error=length_error_base / detail_multiplier)
         if length == 0:
             continue
-        steps = max(int(length / max(tolerance, 0.1)), 1)
+        steps = max(int(length / max(tolerance, 0.1) * detail_multiplier), 1)
         if not current:
             start_point = segment.start
             current.append((start_point.real, start_point.imag))
@@ -204,10 +402,10 @@ def _path_to_lines(path: Path, tolerance: float) -> List[List[Tuple[float, float
     return lines
 
 
-def _path_to_stroke_polygons(path: Path, stroke_width: float, tolerance: float) -> List[Polygon]:
+def _path_to_stroke_polygons(path: Path, stroke_width: float, tolerance: float, detail_scale: float) -> List[Polygon]:
     if stroke_width <= 0:
         return []
-    subpaths = _path_to_lines(path, tolerance)
+    subpaths = _path_to_lines(path, tolerance, detail_scale)
     polygons: List[Polygon] = []
     radius = stroke_width / 2.0
     for points in subpaths:
@@ -295,59 +493,80 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
     shapes: List[ShapeGeometry] = []
 
     for element in svg.elements():
-        if not hasattr(element, "d"):
-            continue
         try:
             element.reify()
         except Exception as exc:  # pragma: no cover - guard for malformed elements
             logger.debug("Skipping element that cannot be reified: %s", exc)
             continue
-        try:
-            path_data = element.d()
-        except Exception as exc:
-            logger.debug("Skipping element without path data: %s", exc)
-            continue
-        if not path_data:
-            continue
-        path = Path(path_data)
+
         tolerance = sampling.segment_tolerance
+        clip_ref = _clip_reference(element)
+        clip_geom = clip_geometries.get(clip_ref) if clip_ref else None
+
+        is_text = isinstance(element, Text)
+        path: Path | None = None
+        fill_sources: List[Polygon] = []
+
+        if is_text:
+            fill_sources = _text_to_polygons(element, tolerance)
+        else:
+            if not hasattr(element, "d"):
+                continue
+            try:
+                path_data = element.d()
+            except Exception as exc:
+                logger.debug("Skipping element without path data: %s", exc)
+                continue
+            if not path_data:
+                continue
+            path = Path(path_data)
+            fill_sources = _path_to_polygons(path, tolerance, sampling.curve_detail_scale)
 
         fill_color = getattr(element, "fill", None)
-        if fill_color is not None and getattr(fill_color, "alpha", 0) not in (None, 0):
-            polygons = _path_to_polygons(path, tolerance)
+        fill_alpha = getattr(fill_color, "alpha", 0) if fill_color else 0
+        if fill_color is not None and fill_alpha not in (None, 0):
+            polygons = _apply_clip(fill_sources, clip_geom) if fill_sources else []
             if polygons:
-                clip_ref = _clip_reference(element)
-                clip_geom = clip_geometries.get(clip_ref) if clip_ref else None
-                polygons = _apply_clip(polygons, clip_geom)
-                if polygons:
-                    brightness = _color_to_brightness(fill_color)
-                    rgb = _color_to_rgb(fill_color)
-                    for polygon in polygons:
-                        polygon = polygon.buffer(0)
-                        if polygon.is_empty or polygon.area <= 0:
-                            continue
-                        shapes.append(
-                            ShapeGeometry(
-                                geometry=polygon,
-                                brightness=brightness,
-                                stroke_width=None,
-                                color=rgb,
-                            )
+                brightness = _color_to_brightness(fill_color)
+                rgb = _color_to_rgb(fill_color)
+                for polygon in polygons:
+                    polygon = polygon.buffer(0)
+                    if polygon.is_empty or polygon.area <= 0:
+                        continue
+                    shapes.append(
+                        ShapeGeometry(
+                            geometry=polygon,
+                            brightness=brightness,
+                            stroke_width=None,
+                            color=rgb,
                         )
+                    )
 
         stroke_color = getattr(element, "stroke", None)
         stroke_width = getattr(element, "stroke_width", None)
         stroke_alpha = getattr(stroke_color, "alpha", 0) if stroke_color else 0
+        stroke_polygons: List[Polygon] = []
         if stroke_color is not None and stroke_alpha not in (None, 0) and stroke_width is not None:
             try:
                 stroke_w = float(stroke_width)
-            except TypeError:
+            except (TypeError, ValueError):
                 stroke_w = float(getattr(stroke_width, "value", 0))
             if stroke_w > 0:
-                stroke_polygons = _path_to_stroke_polygons(path, stroke_w, tolerance)
+                if is_text:
+                    if fill_sources:
+                        union_source = unary_union([poly.buffer(0) for poly in fill_sources if not poly.is_empty])
+                        if not union_source.is_empty:
+                            outer = union_source.buffer(stroke_w / 2.0, cap_style=2, join_style=2)
+                            if not outer.is_empty:
+                                inner = union_source.buffer(-stroke_w / 2.0, cap_style=2, join_style=2)
+                                stroke_geom = outer if inner.is_empty else outer.difference(inner)
+                                stroke_polygons = _geometry_to_polygons(stroke_geom)
+                else:
+                    if path is not None:
+                        stroke_polygons = _path_to_stroke_polygons(
+                            path, stroke_w, tolerance, sampling.curve_detail_scale
+                        )
                 if stroke_polygons:
-                    clip_ref = _clip_reference(element)
-                    clip_geom = clip_geometries.get(clip_ref) if clip_ref else None
                     stroke_polygons = _apply_clip(stroke_polygons, clip_geom)
                     if stroke_polygons:
                         brightness = _color_to_brightness(stroke_color)

@@ -15,7 +15,7 @@ This project provides a command-line slicer that converts filled shapes from an 
 - Optional matplotlib preview plotting only the drawing moves on a white canvas.
 - Can save the preview to an image file for headless environments.
 - Automatically converts thick SVG strokes into filled regions and skips time-consuming hatching for ultra-thin details.
-- Roadmap item: add glyph conversion so raw `<text>` elements can be plotted without manual outline conversion.
+- Converts raw `<text>` elements into outline paths (via Matplotlib's font tooling) so you can plot native SVG text without manually outlining first.
 
 ## Installation
 
@@ -43,6 +43,7 @@ Edit `config.yaml` to match your machine. Printer settings are organised into na
 - `infill`: base line spacing and min/max density along with the infill angles.
 - `sampling.segment_length_tolerance_mm`: detail level when converting curves to polygons.
 - `sampling.outline_simplify_tolerance_mm`: optional smoothing for outlines to reduce extremely small linear segments.
+- `sampling.curve_detail_scale`: multiplier applied when tessellating curves; values above 1 tighten polygonization for smooth circles, while values below 1 speed up coarse drafts.
 
 The sample configuration provides two profiles (`ender3_pro` and `prusa_xl`) to mirror the setups used in previous revisions.
 
@@ -90,6 +91,7 @@ When colour mode is active the slicer reports the exact pen order (least-used co
 ## Notes
 
 - Filled regions and SVG strokes are both converted into hatchable toolpaths.
+- Text glyphs are outlined with Matplotlib's available fonts; if a requested font is missing the fallback face is used.
 - The slicer assumes the printer uses absolute coordinates and millimeters.
 - Preview rendering ignores travel moves so you only see actual drawing strokes on a white background.
 - For very light fills the density is clamped to `infill.min_density`, ensuring at least a faint hatch for the pen plotter.
