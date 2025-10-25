@@ -5,8 +5,9 @@ from typing import Iterable, List, Sequence, Tuple
 
 from shapely import geometry
 from shapely.affinity import rotate
-from shapely.geometry import LineString, Polygon
+from shapely.geometry import LineString, Point as ShapelyPoint, Polygon
 from shapely.geometry.base import BaseGeometry
+from shapely.ops import substring
 
 from .config import InfillConfig
 
@@ -44,10 +45,104 @@ def _point_distance(a: Point, b: Point) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
+def _build_perimeter_loops(polygon: Polygon) -> List[LineString]:
+    if polygon.is_empty:
+        return []
+    loops: List[LineString] = []
+    exterior = polygon.exterior
+    if exterior is not None and not exterior.is_empty:
+        loops.append(LineString(exterior.coords))
+    for interior in polygon.interiors:
+        if interior is not None and not interior.is_empty:
+            loops.append(LineString(interior.coords))
+    return [loop for loop in loops if not loop.is_empty and loop.length > 0]
+
+
+def _loop_section(loop: LineString, start_dist: float, end_dist: float) -> Polyline:
+    if loop.is_empty:
+        return []
+    length = loop.length
+    if length <= 0:
+        return []
+    if math.isclose(start_dist, end_dist, abs_tol=1e-9):
+        point = loop.interpolate(start_dist)
+        return [(float(point.x), float(point.y))]
+    start_dist = max(min(start_dist, length), 0.0)
+    end_dist = max(min(end_dist, length), 0.0)
+    if start_dist <= end_dist:
+        segment = substring(loop, start_dist, end_dist, normalized=False)
+        coords = list(segment.coords)
+    else:
+        head = substring(loop, start_dist, length, normalized=False)
+        tail = substring(loop, 0.0, end_dist, normalized=False)
+        coords = list(head.coords)
+        tail_coords = list(tail.coords)
+        if coords:
+            coords.extend(tail_coords[1:])
+        else:
+            coords = tail_coords
+    if not coords:
+        start_point = loop.interpolate(start_dist)
+        end_point = loop.interpolate(end_dist)
+        coords = [
+            (float(start_point.x), float(start_point.y)),
+            (float(end_point.x), float(end_point.y)),
+        ]
+    return [(float(x), float(y)) for x, y in coords]
+
+
+def _perimeter_glide_path(
+    start: Point,
+    end: Point,
+    loops: Sequence[LineString] | None,
+    tolerance: float,
+) -> Polyline | None:
+    if not loops:
+        return None
+    check_tolerance = max(tolerance * 2.0, 1e-6)
+    start_geom = ShapelyPoint(start)
+    end_geom = ShapelyPoint(end)
+    best_path: Polyline | None = None
+    best_length = float("inf")
+
+    for loop in loops:
+        if loop.is_empty or loop.length <= 0:
+            continue
+        start_dist = loop.project(start_geom)
+        nearest_start = loop.interpolate(start_dist)
+        if start_geom.distance(nearest_start) > check_tolerance:
+            continue
+        end_dist = loop.project(end_geom)
+        nearest_end = loop.interpolate(end_dist)
+        if end_geom.distance(nearest_end) > check_tolerance:
+            continue
+        forward = _loop_section(loop, start_dist, end_dist)
+        backward = list(reversed(_loop_section(loop, end_dist, start_dist)))
+        for path in (forward, backward):
+            if not path:
+                continue
+            path[0] = start
+            path[-1] = end
+            deduped: Polyline = [path[0]]
+            for point in path[1:]:
+                if _point_distance(point, deduped[-1]) > 1e-9:
+                    deduped.append(point)
+            if len(deduped) < 2:
+                continue
+            length_value = sum(
+                _point_distance(deduped[i - 1], deduped[i]) for i in range(1, len(deduped))
+            )
+            if length_value < best_length - 1e-9:
+                best_length = length_value
+                best_path = deduped
+    return best_path
+
+
 def _merge_boustrophedon(
     lines: Sequence[Polyline],
     max_gap: float,
     region: Polygon | None = None,
+    perimeter_loops: Sequence[LineString] | None = None,
 ) -> List[Polyline]:
     pending: List[Polyline] = [list(line) for line in lines if len(line) >= 2]
     if not pending:
@@ -72,16 +167,26 @@ def _merge_boustrophedon(
         line = pending.pop(next_index)
         distance = distances[next_index] if last_point is not None else 0.0
 
-        if distance <= max_gap:
-            if distance > 0 and last_point is not None and region is not None:
-                connector = LineString([last_point, line[0]])
-                if not region.buffer(1e-9).covers(connector):
+        if distance <= max_gap + 1e-9:
+            connector_path: Polyline | None = None
+            if distance > 1e-9 and last_point is not None:
+                connector_path = _perimeter_glide_path(
+                    last_point,
+                    line[0],
+                    perimeter_loops,
+                    tolerance=max_gap,
+                )
+                if connector_path is None and perimeter_loops is None and region is not None:
+                    connector = LineString([last_point, line[0]])
+                    if region.buffer(1e-9).covers(connector):
+                        connector_path = [last_point, line[0]]
+            if distance > 1e-9 and last_point is not None:
+                if connector_path is None:
                     merged.append(current)
                     current = list(line)
                     last_point = current[-1]
                     continue
-            if distance > 0 and last_point is not None:
-                current.append(line[0])
+                current.extend(connector_path[1:])
             current.extend(line[1:])
             last_point = current[-1]
         else:
@@ -99,6 +204,7 @@ def _glue_polylines(
     polylines: List[Polyline],
     tolerance: float,
     region: Polygon | None = None,
+    perimeter_loops: Sequence[LineString] | None = None,
 ) -> List[Polyline]:
     if not polylines:
         return []
@@ -118,14 +224,24 @@ def _glue_polylines(
             candidate = list(reversed(polyline))
             start_distance = end_distance
         if start_distance <= tolerance:
-            if start_distance > 0 and region is not None:
-                connector = LineString([start, candidate[0]])
-                if not region.buffer(1e-9).covers(connector):
-                    glued.append(current)
-                    current = list(candidate)
-                    continue
-            if start_distance > 0:
-                current.append(candidate[0])
+            connector_path: Polyline | None = None
+            if start_distance > 1e-9:
+                connector_path = _perimeter_glide_path(
+                    start,
+                    candidate[0],
+                    perimeter_loops,
+                    tolerance,
+                )
+                if connector_path is None and perimeter_loops is None and region is not None:
+                    connector = LineString([start, candidate[0]])
+                    if region.buffer(1e-9).covers(connector):
+                        connector_path = [start, candidate[0]]
+            if start_distance > 1e-9 and connector_path is None:
+                glued.append(current)
+                current = list(candidate)
+                continue
+            if connector_path is not None and len(connector_path) > 1:
+                current.extend(connector_path[1:])
             current.extend(candidate[1:])
         else:
             glued.append(current)
@@ -159,6 +275,7 @@ def generate_rectilinear_infill(
     angle_paths: List[List[Polyline]] = []
     merge_tolerance = min(spacing * 0.25, config.base_spacing * 0.25)
     merge_tolerance = max(merge_tolerance, 1e-4)
+    perimeter_loops = _build_perimeter_loops(polygon)
 
     for index, angle in enumerate(config.angles):
         rotated = rotate(polygon, -angle, origin=origin, use_radians=False)
@@ -201,11 +318,21 @@ def generate_rectilinear_infill(
 
         if index % 2 == 1:
             alternating.reverse()
-        merged = _merge_boustrophedon(alternating, max_gap=merge_tolerance, region=polygon)
+        merged = _merge_boustrophedon(
+            alternating,
+            max_gap=merge_tolerance,
+            region=polygon,
+            perimeter_loops=perimeter_loops,
+        )
         angle_paths.append([poly for poly in merged if poly])
 
     merged_paths = _interleave_orientations(angle_paths)
-    return _glue_polylines(merged_paths, merge_tolerance, region=polygon)
+    return _glue_polylines(
+        merged_paths,
+        merge_tolerance,
+        region=polygon,
+        perimeter_loops=perimeter_loops,
+    )
 
 
 def _interleave_orientations(angle_polylines: List[List[Polyline]]) -> List[Polyline]:

@@ -350,6 +350,8 @@ def write_toolpaths_to_gcode(toolpaths: Iterable[Toolpath], output_path: Path, c
     else:
         generator.draw_toolpaths(toolpath_list, config.printer.feedrates)
 
+    estimated_text = generator.formatted_elapsed_time()
+    generator.emit_comment(f"Estimated plot time: {estimated_text}")
     generator.emit_footer()
 
     gcode_lines = generator.generate()
@@ -357,6 +359,7 @@ def write_toolpaths_to_gcode(toolpaths: Iterable[Toolpath], output_path: Path, c
     logger.info("Wrote %d G-code lines to %s", len(gcode_lines), output_path)
     if color_order:
         logger.info("Color order: %s", " -> ".join(color_order))
+    logger.info("Estimated plot time: %s (motion only)", estimated_text)
     return GcodeWriteResult(line_count=len(gcode_lines), color_order=color_order)
 
 
