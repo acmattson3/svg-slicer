@@ -167,32 +167,40 @@ def _merge_boustrophedon(
         line = pending.pop(next_index)
         distance = distances[next_index] if last_point is not None else 0.0
 
-        if distance <= max_gap + 1e-9:
-            connector_path: Polyline | None = None
-            if distance > 1e-9 and last_point is not None:
-                connector_path = _perimeter_glide_path(
-                    last_point,
-                    line[0],
-                    perimeter_loops,
-                    tolerance=max_gap,
-                )
-                if connector_path is None and perimeter_loops is None and region is not None:
-                    connector = LineString([last_point, line[0]])
-                    if region.buffer(1e-9).covers(connector):
-                        connector_path = [last_point, line[0]]
-            if distance > 1e-9 and last_point is not None:
-                if connector_path is None:
-                    merged.append(current)
-                    current = list(line)
-                    last_point = current[-1]
-                    continue
-                current.extend(connector_path[1:])
-            current.extend(line[1:])
-            last_point = current[-1]
-        else:
+        connector_path: Polyline | None = None
+        if (
+            last_point is not None
+            and distance > 1e-9
+        ):
+            connector_path = _perimeter_glide_path(
+                last_point,
+                line[0],
+                perimeter_loops,
+                tolerance=max_gap,
+            )
+            if (
+                connector_path is None
+                and perimeter_loops is None
+                and region is not None
+                and distance <= max_gap + 1e-9
+            ):
+                connector = LineString([last_point, line[0]])
+                if region.buffer(1e-9).covers(connector):
+                    connector_path = [last_point, line[0]]
+
+        has_path = connector_path is not None and len(connector_path) >= 2
+        can_connect = distance <= 1e-9 or has_path
+
+        if not can_connect:
             merged.append(current)
             current = list(line)
             last_point = current[-1]
+            continue
+
+        if has_path:
+            current.extend(connector_path[1:])
+        current.extend(line[1:])
+        last_point = current[-1]
 
     if current:
         merged.append(current)
@@ -223,29 +231,36 @@ def _glue_polylines(
         if end_distance < start_distance:
             candidate = list(reversed(polyline))
             start_distance = end_distance
-        if start_distance <= tolerance:
-            connector_path: Polyline | None = None
-            if start_distance > 1e-9:
-                connector_path = _perimeter_glide_path(
-                    start,
-                    candidate[0],
-                    perimeter_loops,
-                    tolerance,
-                )
-                if connector_path is None and perimeter_loops is None and region is not None:
-                    connector = LineString([start, candidate[0]])
-                    if region.buffer(1e-9).covers(connector):
-                        connector_path = [start, candidate[0]]
-            if start_distance > 1e-9 and connector_path is None:
-                glued.append(current)
-                current = list(candidate)
-                continue
-            if connector_path is not None and len(connector_path) > 1:
-                current.extend(connector_path[1:])
-            current.extend(candidate[1:])
-        else:
+
+        connector_path: Polyline | None = None
+        if start_distance > 1e-9:
+            connector_path = _perimeter_glide_path(
+                start,
+                candidate[0],
+                perimeter_loops,
+                tolerance,
+            )
+            if (
+                connector_path is None
+                and perimeter_loops is None
+                and region is not None
+                and start_distance <= tolerance + 1e-9
+            ):
+                connector = LineString([start, candidate[0]])
+                if region.buffer(1e-9).covers(connector):
+                    connector_path = [start, candidate[0]]
+
+        has_path = connector_path is not None and len(connector_path) >= 2
+        can_connect = start_distance <= 1e-9 or has_path
+
+        if not can_connect:
             glued.append(current)
             current = list(candidate)
+            continue
+
+        if has_path:
+            current.extend(connector_path[1:])
+        current.extend(candidate[1:])
 
     glued.append(current)
     return glued

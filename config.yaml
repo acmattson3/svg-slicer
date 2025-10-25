@@ -24,8 +24,9 @@ printers:
       - "#9d5352" # Red
       - "#c7663e" # Orange
       - "#baa961" # Yellow
-      - "#87bd5c" # Yellow-Green
+      - "#87bd5c" # Lime
       - "#4bbd5d" # Green
+      - "#328f68" # Turqoise
       - "#4dd1c1" # Cyan
       - "#292f7d" # Blue
       - "#69409c" # Purple
