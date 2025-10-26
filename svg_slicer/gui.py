@@ -13,7 +13,7 @@ from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
 import yaml
 
 try:
-    from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+    from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QTimer
     from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
     from PySide6.QtWidgets import (
         QApplication,
@@ -68,6 +68,8 @@ from .svg_parser import ShapeGeometry, parse_svg
 
 
 _LOGGER = logging.getLogger(__name__)
+
+_MIN_FIELD_HEIGHT = 28
 
 
 def _running_in_wsl() -> bool:
@@ -468,6 +470,7 @@ class BuildPlateView(QGraphicsView):
         self._toolpath_items: List[QGraphicsPathItem] = []
         self._model_items: List[ModelGraphicsItem] = []
         self._suppress_selection_signal = False
+        self._refit_pending = False
 
         self._scene.selectionChanged.connect(self._handle_selection_changed)
 
@@ -514,13 +517,14 @@ class BuildPlateView(QGraphicsView):
         self._info_item.setZValue(5)
         self._update_info_position()
         self._update_info_visibility()
-        self._refit()
+        self._schedule_refit()
 
     def reset_models(self, models: Sequence[LoadedModel]) -> None:
         self.clear_models()
         for model in models:
             self.add_model(model)
         self._update_info_visibility()
+        self._schedule_refit()
 
     def add_model(self, model: LoadedModel) -> None:
         if not self._bed_rect or self._bed_rect.isNull():
@@ -530,6 +534,7 @@ class BuildPlateView(QGraphicsView):
         self._model_items.append(item)
         model.item = item
         self._update_info_visibility()
+        self._schedule_refit()
 
     def update_model_item(self, model: LoadedModel) -> None:
         if model.item is None:
@@ -544,6 +549,7 @@ class BuildPlateView(QGraphicsView):
             self._model_items.remove(model.item)
         model.item = None
         self._update_info_visibility()
+        self._schedule_refit()
 
     def clear_models(self) -> None:
         for item in self._model_items:
@@ -552,6 +558,7 @@ class BuildPlateView(QGraphicsView):
             item.model.item = None
         self._model_items.clear()
         self._update_info_visibility()
+        self._schedule_refit()
 
     def update_toolpaths(self, toolpaths: Iterable[Toolpath]) -> None:
         self.clear_toolpaths()
@@ -573,6 +580,7 @@ class BuildPlateView(QGraphicsView):
             self._toolpath_items.append(item)
 
         self._update_info_visibility()
+        self._schedule_refit()
 
     def clear_toolpaths(self) -> None:
         for item in self._toolpath_items:
@@ -580,6 +588,7 @@ class BuildPlateView(QGraphicsView):
                 self._scene.removeItem(item)
         self._toolpath_items.clear()
         self._update_info_visibility()
+        self._schedule_refit()
 
     def _accepts_mime(self, event) -> bool:
         mime = event.mimeData()
@@ -617,6 +626,17 @@ class BuildPlateView(QGraphicsView):
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._refit()
+
+    def _schedule_refit(self) -> None:
+        if self._refit_pending:
+            return
+        self._refit_pending = True
+
+        def trigger() -> None:
+            self._refit_pending = False
+            self._refit()
+
+        QTimer.singleShot(0, trigger)
 
     def _refit(self) -> None:
         if not self._bed_item:
@@ -970,6 +990,7 @@ class SettingsTab(QWidget):
 
         printer_group = QGroupBox("Printer")
         printer_form = QFormLayout()
+        printer_form.setVerticalSpacing(max(printer_form.verticalSpacing(), 6))
         printer_group.setLayout(printer_form)
 
         self.printer_name_edit = QLineEdit()
@@ -1125,9 +1146,16 @@ class SettingsTab(QWidget):
         return spin
 
     @staticmethod
-    def _set_wide(widget, minimum_width: int = 180, vertical_policy: QSizePolicy.Policy = QSizePolicy.Fixed) -> None:
+    def _set_wide(
+        widget,
+        minimum_width: int = 180,
+        vertical_policy: QSizePolicy.Policy = QSizePolicy.MinimumExpanding,
+    ) -> None:
         widget.setMinimumWidth(minimum_width)
         widget.setSizePolicy(QSizePolicy.Expanding, vertical_policy)
+        hint = widget.sizeHint()
+        hint_height = hint.height() if hint.isValid() and hint.height() > 0 else 0
+        widget.setMinimumHeight(max(hint_height, _MIN_FIELD_HEIGHT))
 
     def set_config(self, config: SlicerConfig, profiles: List[str], current_profile: Optional[str]) -> None:
         self._config = config
@@ -1339,14 +1367,15 @@ class MainWindow(QMainWindow):
         self.settings_tab = SettingsTab()
         self.tabs.addTab(self.prepare_tab, "Prepare")
         self.tabs.addTab(self.settings_tab, "Settings")
-        self._layout.addWidget(self.tabs, stretch=1)
+        self._layout.addWidget(self.tabs, stretch=2)
 
         self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setPlaceholderText("Log output will appear here.")
         self.log_output.setMaximumBlockCount(5000)
-        self.log_output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self._layout.addWidget(self.log_output, stretch=0)
+        self.log_output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.log_output.setMinimumHeight(140)
+        self._layout.addWidget(self.log_output, stretch=1)
 
         self.statusBar().showMessage("Ready")
 
