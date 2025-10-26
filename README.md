@@ -1,97 +1,102 @@
 # SVG Slicer for Pen Plotter 3D Printers
 
-This project provides a command-line slicer that converts filled shapes from an SVG file into G-code suitable for a pen attachment mounted on a modified 3D printer. Instead of extruding filament, the slicer treats the printer as a 2D plotter, automatically scaling the artwork to fit your printable area, converting the design to grayscale, and producing rectilinear infill that varies with shape brightness.
+SVG Slicer for Pen Plotter 3D Printers bundles a command-line tool and a PySide6 GUI that turn filled SVG artwork into pen-plotter G-code for modified 3D printers. The CLI auto-fits incoming artwork to the printable area and can emit either brightness-driven hatching or palette-based colour passes. The GUI builds on the same engine with queue management, live placement, and configuration editing so you can validate a job before exporting it.
+
+Under the hood the slicer resolves fills, strokes, and text into geometry, applies configurable perimeter and infill strategies, and writes annotated G-code that documents colour order and motion-only plot time.
 
 ## Features
 
-- PySide6-powered GUI lets you queue multiple SVGs, scale and rotate each model interactively on a virtual build plate, preview toolpaths, and export G-code in one flow.
-- Loads configuration from YAML with typical printer settings (bed size, safe offsets, feedrates, lift heights, start/end sequences).
-- Parses SVG documents (via `svgelements`) and converts fills to grayscale so the line density reflects the shape brightness when running in black-and-white mode.
-- Optional colour-mode maps each SVG fill/stroke to the nearest entry in your configured pen palette, batches every assigned colour, and inserts your custom pause script between colours (defaults to `M600`) in least-used-first order.
-- Uniformly scales and flips the design into printer coordinates while keeping within the configured X/Y borders.
-- Traces perimeter bands with configurable thickness, duplicating outline passes for stroke-width coverage and hatching stroke/fill regions (respecting SVG stroke widths when present) for solid coverage.
-- Generates rectilinear cross-hatch infill (configurable angles) for each filled shape—darker shapes receive denser line spacing, and the slicer greedily chains line segments across both orientations to minimise pen lifts.
-- Emits travel/drawing G-code with configurable speeds and Z-lift for pen-up travel moves.
-- Optional matplotlib preview plotting only the drawing moves on a white canvas.
-- Can save the preview to an image file for headless environments.
-- Automatically converts thick SVG strokes into filled regions and skips time-consuming hatching for ultra-thin details.
-- Converts raw `<text>` elements into outline paths (via Matplotlib's font tooling) so you can plot native SVG text without manually outlining first.
+- PySide6 GUI lets you drag-and-drop multiple SVGs, rescale and rotate each model with live footprint readouts, position artwork directly on the virtual build plate, and export the queued job to a single G-code file.
+- Built-in configuration editor loads/saves YAML printer profiles including bed limits, feedrates, start/end sequences, pause scripts, and colour palettes.
+- Palette-aware colour workflow maps SVG fills/strokes to the nearest configured colour, batches passes in least-used order, and inserts your pause script (default `M600`) while logging the planned colour order.
+- Black-and-white mode converts fills to grayscale, driving density-scaled cross-hatch infill with perimeter glides to minimise pen lifts while thick strokes receive dedicated outline passes.
+- Automatically tessellates SVG `<text>` via Matplotlib fonts, converts thick strokes into filled regions, and honours SVG z-order so upper shapes mask lower ones.
+- Optional Matplotlib preview renders only drawing moves; you can display it interactively or export a PNG for headless environments.
+- G-code output includes a motion-only time estimate and total line count so you can gauge run time before plotting.
 
 ## Installation
 
-System packages are used for dependencies. On Ubuntu/WSL you can install them with:
+SVG Slicer targets Python 3 and relies on Shapely, svgelements, PyYAML, Matplotlib, and (for the GUI) PySide6.
 
-```bash
-sudo apt-get install python3-svgelements python3-shapely python3-yaml python3-matplotlib
-```
+- **Ubuntu / WSL packages**
 
-No additional virtual environment is required; the CLI runs with the system Python (`/usr/bin/python3`).
+  ```bash
+  sudo apt-get install python3-svgelements python3-shapely python3-yaml python3-matplotlib python3-pyside6.qt6
+  ```
+
+- **pip (in a virtual environment or `--user`)**
+
+  ```bash
+  python3 -m pip install --upgrade pip
+  python3 -m pip install svgelements shapely PyYAML matplotlib PySide6
+  ```
+
+PySide6 is only required when launching the GUI; the CLI can run headless.
 
 ## Configuration
 
-Edit `config.yaml` to match your machine. Printer settings are organised into named profiles so you can switch between different hardware or toolheads with a flag:
+Edit `config.yaml` to match your machine. Printer settings can be grouped into named profiles and switched at runtime.
 
-- `default_printer`: optional name of the profile selected when `--printer-profile` is omitted (falls back to the first profile otherwise).
-- `printers.<profile>.bed_size_mm`: overall bed dimensions for each profile.
-- `printers.<profile>.origin_offsets_mm`: usable XY area relative to the machine origin.
-- `printers.<profile>.z_heights_mm` and `printers.<profile>.z_lift_height_mm`: commanded pen-down, travel, and lift heights.
-- `printers.<profile>.feedrates_mm_s`: drawing, travel, and Z feedrates expressed in mm/s.
-- `printers.<profile>.color_mode`: enable (`true`) or disable (`false`) the colour workflow for that profile.
-- `printers.<profile>.available_colors`: ordered list of hex colours (e.g. `["#000000", "#FF0000"]`) representing the pens you have on hand; the slicer snaps SVG colours to the closest entry.
-- `printers.<profile>.pause_gcode`: commands executed between colour batches (e.g. manual pause macro with safe Z lift and parking move); defaults to `M600` when omitted.
-- `perimeter`: thickness, density, and the minimum width at which hatch infill is attempted.
-- `infill`: base line spacing and min/max density along with the infill angles.
-- `sampling.segment_length_tolerance_mm`: detail level when converting curves to polygons.
-- `sampling.outline_simplify_tolerance_mm`: optional smoothing for outlines to reduce extremely small linear segments.
-- `sampling.curve_detail_scale`: multiplier applied when tessellating curves; values above 1 tighten polygonization for smooth circles, while values below 1 speed up coarse drafts.
+- `default_printer`: optional profile name selected when `--printer-profile` is omitted.
+- `printers.<profile>.name`: friendly printer label used in logs and previews.
+- `printers.<profile>.bed_size_mm.width|depth`: overall bed dimensions.
+- `printers.<profile>.origin_offsets_mm.x_min|x_max|y_min|y_max`: usable XY window inside the physical bed.
+- `printers.<profile>.z_heights_mm.draw|travel`: Z heights for pen-down and pen-up moves; `z_lift_height_mm` optionally overrides lift distance.
+- `printers.<profile>.feedrates_mm_s.draw|travel|z`: drawing, travel, and Z feedrates in mm/s.
+- `printers.<profile>.start_gcode` / `end_gcode`: sequences emitted before and after plotting.
+- `printers.<profile>.color_mode`: enables palette-based runs for that profile.
+- `printers.<profile>.available_colors`: ordered list of `#RRGGBB` strings representing pens on hand; required when colour mode is enabled.
+- `printers.<profile>.pause_gcode`: commands executed between colour batches (defaults to `["M600"]` if omitted).
+- `infill.base_line_spacing_mm`, `min_density`, `max_density`, `angles_degrees`: tune cross-hatch spacing, density range, and rotation angles.
+- `perimeter.thickness_mm`, `density`, `min_fill_width_mm`: outline width, duplication factor, and the minimum feature size that still receives hatch infill.
+- `sampling.segment_length_tolerance_mm`, `outline_simplify_tolerance_mm`, `curve_detail_scale`: geometry sampling controls that balance fidelity against speed.
+- `rendering.preview_line_width_mm`: stroke width used in Matplotlib previews.
 
-The sample configuration provides two profiles (`ender3_pro` and `prusa_xl`) to mirror the setups used in previous revisions.
+The sample configuration contains Ender 3 Pro and Prusa XL profiles as references.
 
 ## Usage
 
 ### GUI
 
-The GUI is the quickest way to manage multiple SVGs, tweak their placement, change scale/rotation, and generate G-code:
-
 ```bash
-/usr/bin/python3 -m svg_slicer --config config.yaml
+python3 -m svg_slicer --config config.yaml
 ```
 
-Key interactions:
-
-- Drag-and-drop SVG files (or use the “Add SVGs…” button) to queue models.
-- Select a model in the list to adjust its scale (%) or rotation (°) in the sidebar; the footprint readout updates live.
-- Drag models around the virtual build plate; the view auto-fits the printable area from your selected profile.
-- Click “Slice” to generate the toolpaths and save the G-code to the path shown at the bottom of the sidebar.
-
-On Wayland-based WSL environments the app automatically switches Qt to the `xcb` backend to avoid protocol errors.
+- Provide `--printer-profile <name>` to open with a specific profile.
+- Drop SVG files onto the build plate or use **Add SVGs…**; each file is auto-fit to the printable area once on import.
+- Select a model to adjust scale (percent), rotation (degrees), and XY position; the footprint readout shows the post-scale bounds and warns if you exceed the printable window.
+- Set the destination path for the exported G-code and press **Slice** to generate toolpaths. The status bar and log window report line count, colour order (if applicable), and the estimated plot time.
+- Configure printer profiles, palettes, infill, and sampling values on the **Settings** tab, then apply or save back to YAML.
+- On Wayland-based WSL environments the app automatically switches Qt to the `xcb` backend to avoid protocol issues.
 
 ### CLI
 
 ```bash
-/usr/bin/python3 -m svg_slicer path/to/art.svg \
+python3 -m svg_slicer.cli path/to/art.svg \
   --config config.yaml \
   --printer-profile ender3_pro \
   --output out.gcode \
   --preview-file preview.png
 ```
 
-Flags:
+Common flags:
 
-- `--preview` opens an interactive matplotlib plot of the drawing moves.
-- `--preview-file` saves the preview image instead (helpful on headless systems).
-- `--printer-profile` picks a named printer profile from the configuration file.
+- `--preview` opens an interactive Matplotlib window; `--preview-file` saves the image instead.
+- `--color-mode` or `--bw-mode` override the profile default for a single run.
 - `--log-level` adjusts verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`).
-- `--color-mode` / `--bw-mode` let you override the profile’s default to force palette-based output or traditional black-and-white hatching on a per-run basis.
 
-Generated G-code starts with the configured start-up sequence (home → lift → move to front-left origin), traces perimeter bands, then applies cross-hatch infill with spacing tied to grayscale brightness while respecting SVG stacking order so upper shapes mask lower ones.
+The CLI reports the auto-fit scale factor, planned colour order, and motion-only time estimate in both the console and emitted G-code comments.
 
-When colour mode is active the slicer reports the exact pen order (least-used colour first) in the CLI/G-code comments and runs your configured pause script between colours so you only swap pens when necessary. Black-and-white mode preserves the previous brightness-to-density behaviour.
+## Scaling and Colour Behaviour
+
+- The CLI always fits artwork to the configured printable area and mirrors it into printer coordinates, ensuring the result lives within `origin_offsets_mm`.
+- The GUI fits each SVG on import to establish a safe starting scale, but any manual scale, rotation, or placement you apply is preserved during slicing—no additional auto-scaling occurs when you press **Slice**.
+- Colour mode and black-and-white mode share the same toolpath generator; palette settings live in the active printer profile and can be overridden in both CLI and GUI flows.
 
 ## Notes
 
-- Filled regions and SVG strokes are both converted into hatchable toolpaths.
-- Text glyphs are outlined with Matplotlib's available fonts; if a requested font is missing the fallback face is used.
-- The slicer assumes the printer uses absolute coordinates and millimeters.
-- Preview rendering ignores travel moves so you only see actual drawing strokes on a white background.
-- For very light fills the density is clamped to `infill.min_density`, ensuring at least a faint hatch for the pen plotter.
+- Filled regions and SVG strokes are converted into hatchable toolpaths; extremely thin strokes fall back to single tracing passes.
+- Brightness mapping clamps infill density between `infill.min_density` and `infill.max_density`, enabling faint shading for light fills and solid hatching for dark regions.
+- Text glyphs are outlined with Matplotlib fonts; if a requested font is unavailable the default fallback face is used.
+- Generated G-code assumes absolute coordinates in millimetres.
+- Preview rendering and exported toolpaths ignore travel moves so only actual drawing strokes appear.
