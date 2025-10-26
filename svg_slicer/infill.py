@@ -14,6 +14,16 @@ from .config import InfillConfig
 Point = Tuple[float, float]
 Polyline = List[Point]
 
+MAX_PERIMETER_GLIDE_LENGTH = 10.0
+
+
+def _polyline_length(polyline: Sequence[Point]) -> float:
+    if len(polyline) < 2:
+        return 0.0
+    return sum(
+        _point_distance(polyline[i - 1], polyline[i]) for i in range(1, len(polyline))
+    )
+
 
 def _collect_segments(geom: BaseGeometry) -> Iterable[LineString]:
     if geom.is_empty:
@@ -199,16 +209,23 @@ def _merge_boustrophedon(
         distance = distances[next_index] if last_point is not None else 0.0
 
         connector_path: Polyline | None = None
+        perimeter_path: Polyline | None = None
         if (
             last_point is not None
             and distance > 1e-9
         ):
-            connector_path = _perimeter_glide_path(
+            perimeter_path = _perimeter_glide_path(
                 last_point,
                 line[0],
                 perimeter_loops,
                 tolerance=max_gap,
             )
+            if (
+                perimeter_path is not None
+                and _polyline_length(perimeter_path) > MAX_PERIMETER_GLIDE_LENGTH + 1e-9
+            ):
+                perimeter_path = None
+            connector_path = perimeter_path
             if (
                 connector_path is None
                 and perimeter_loops is None
@@ -264,13 +281,20 @@ def _glue_polylines(
             start_distance = end_distance
 
         connector_path: Polyline | None = None
+        perimeter_path: Polyline | None = None
         if start_distance > 1e-9:
-            connector_path = _perimeter_glide_path(
+            perimeter_path = _perimeter_glide_path(
                 start,
                 candidate[0],
                 perimeter_loops,
                 tolerance,
             )
+            if (
+                perimeter_path is not None
+                and _polyline_length(perimeter_path) > MAX_PERIMETER_GLIDE_LENGTH + 1e-9
+            ):
+                perimeter_path = None
+            connector_path = perimeter_path
             if (
                 connector_path is None
                 and perimeter_loops is None
