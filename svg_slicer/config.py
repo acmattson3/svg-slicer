@@ -68,6 +68,8 @@ class SamplingConfig:
     segment_tolerance: float
     outline_simplify_tolerance: float
     curve_detail_scale: float = 1.0
+    raster_sample_spacing: float = 2.0
+    raster_max_cells: int = 4000
 
 
 @dataclass
@@ -235,6 +237,8 @@ def load_config(path: str | pathlib.Path, profile: str | None = None) -> SlicerC
             )
         ),
         curve_detail_scale=float(sampling_raw.get("curve_detail_scale", 1.0)),
+        raster_sample_spacing=float(sampling_raw.get("raster_sample_spacing_mm", 2.0)),
+        raster_max_cells=int(sampling_raw.get("raster_max_cells", 4000)),
     )
 
     perimeter_raw = raw.get("perimeter", {})

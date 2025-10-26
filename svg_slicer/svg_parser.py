@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
+from PIL import Image as PILImage
 from shapely.affinity import affine_transform as shapely_affine_transform
 from shapely.affinity import scale as shapely_scale
 from shapely.affinity import translate as shapely_translate
 from shapely.geometry import GeometryCollection, LineString, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
-from svgelements import Arc, ClipPath, Color, Move, Path, SVG, Text
+from svgelements import Arc, ClipPath, Color, Image, Move, Path, SVG, Text
 from matplotlib.font_manager import FontProperties
 from matplotlib.textpath import TextPath
 
@@ -485,6 +487,178 @@ def _apply_clip(polygons: List[Polygon], clip: BaseGeometry | None) -> List[Poly
     return clipped
 
 
+def _composite_pixel_rgba(pixel) -> Tuple[tuple[int, int, int], float, float]:
+    if len(pixel) == 4:
+        r, g, b, a = pixel
+    elif len(pixel) == 3:
+        r, g, b = pixel
+        a = 255
+    else:
+        r = g = b = pixel[0]
+        a = 255
+    alpha = max(0.0, min(1.0, a / 255.0))
+    inv_alpha = 1.0 - alpha
+    comp_r = int(round(r * alpha + 255.0 * inv_alpha))
+    comp_g = int(round(g * alpha + 255.0 * inv_alpha))
+    comp_b = int(round(b * alpha + 255.0 * inv_alpha))
+    brightness = (0.299 * comp_r + 0.587 * comp_g + 0.114 * comp_b) / 255.0
+    return (comp_r, comp_g, comp_b), max(0.0, min(1.0, brightness)), alpha
+
+
+def _image_to_shape_geometries(
+    element: Image, sampling: SamplingConfig, clip_geom: BaseGeometry | None
+) -> List[ShapeGeometry]:
+    shapes: List[ShapeGeometry] = []
+
+    try:
+        element.load()
+    except Exception as exc:  # pragma: no cover - guard for malformed images
+        logger.debug("Skipping image that cannot be loaded: %s", exc)
+        return shapes
+
+    pil_image = getattr(element, "image", None)
+    if pil_image is None:
+        return shapes
+
+    width_px, height_px = pil_image.size
+    if width_px == 0 or height_px == 0:
+        return shapes
+
+    bbox = element.bbox()
+    if bbox is None:
+        return shapes
+    minx, miny, maxx, maxy = bbox
+    width_world = maxx - minx
+    height_world = maxy - miny
+    if width_world <= 0 or height_world <= 0:
+        return shapes
+
+    spacing = getattr(sampling, "raster_sample_spacing", None)
+    if not spacing or spacing <= 0:
+        spacing = max(sampling.segment_tolerance, 1.0)
+    max_cells = int(getattr(sampling, "raster_max_cells", 4000))
+    columns = max(1, min(width_px, int(math.ceil(width_world / spacing))))
+    rows = max(1, min(height_px, int(math.ceil(height_world / spacing))))
+    total_cells = columns * rows
+    if total_cells > max_cells:
+        scale = math.sqrt(total_cells / max_cells)
+        columns = max(1, min(width_px, int(columns / scale)))
+        rows = max(1, min(height_px, int(rows / scale)))
+
+    if columns == 0 or rows == 0:
+        return shapes
+
+    resized = pil_image.convert("RGBA").resize((columns, rows), PILImage.BILINEAR)
+    pixels = resized.load()
+
+    transform_params = _matrix_to_affine_params(getattr(element, "transform", None))
+
+    alpha_threshold = 0.05
+    skip_brightness_threshold = 0.995
+    brightness_tol = 0.08
+    color_tol = 18.0
+
+    def flush_run(run):
+        if not run:
+            return
+        weight = run["weight"]
+        if weight <= 0:
+            return
+        brightness = run["brightness_sum"] / weight
+        brightness = max(0.0, min(1.0, brightness))
+        color = run["color_sum"]
+        if color is not None:
+            rgb = tuple(
+                max(0, min(255, int(round(channel / weight))))
+                for channel in color
+            )
+        else:
+            rgb = None
+        x0 = run["start"] / columns
+        x1 = run["end"] / columns
+        if x1 <= x0:
+            return
+        row_index = run["row"]
+        y0 = row_index / rows
+        y1 = (row_index + 1) / rows
+        if y1 <= y0:
+            return
+        base_poly = Polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+        if base_poly.is_empty or base_poly.area <= 0:
+            return
+        transformed = shapely_affine_transform(base_poly, transform_params)
+        if transformed.is_empty or transformed.area <= 0:
+            return
+        if clip_geom is not None:
+            polygons = _apply_clip([transformed], clip_geom)
+        else:
+            polygons = [transformed]
+        for polygon in polygons:
+            polygon = polygon.buffer(0)
+            if polygon.is_empty or polygon.area <= 0:
+                continue
+            shapes.append(
+                ShapeGeometry(
+                    geometry=polygon,
+                    brightness=brightness,
+                    stroke_width=None,
+                    color=rgb,
+                )
+            )
+
+    for row in range(rows):
+        run = None
+        for col in range(columns):
+            pixel = pixels[col, row]
+            color_rgb, brightness, alpha = _composite_pixel_rgba(pixel)
+            if alpha <= alpha_threshold or brightness >= skip_brightness_threshold:
+                flush_run(run)
+                run = None
+                continue
+
+            weight = alpha
+            if not run:
+                run = {
+                    "row": row,
+                    "start": col,
+                    "end": col + 1,
+                    "weight": weight,
+                    "brightness_sum": brightness * weight,
+                    "avg_brightness": brightness,
+                    "color_sum": [channel * weight for channel in color_rgb],
+                    "avg_color": color_rgb,
+                }
+                continue
+
+            avg_brightness = run["brightness_sum"] / run["weight"]
+            brightness_diff = abs(brightness - avg_brightness)
+            current_color = tuple(channel / run["weight"] for channel in run["color_sum"])
+            color_diff = max(abs(color_rgb[i] - current_color[i]) for i in range(3))
+            if brightness_diff > brightness_tol or color_diff > color_tol:
+                flush_run(run)
+                run = {
+                    "row": row,
+                    "start": col,
+                    "end": col + 1,
+                    "weight": weight,
+                    "brightness_sum": brightness * weight,
+                    "avg_brightness": brightness,
+                    "color_sum": [channel * weight for channel in color_rgb],
+                    "avg_color": color_rgb,
+                }
+                continue
+
+            run["end"] = col + 1
+            run["weight"] += weight
+            run["brightness_sum"] += brightness * weight
+            for idx in range(3):
+                run["color_sum"][idx] += color_rgb[idx] * weight
+
+        flush_run(run)
+
+    return shapes
+
+
 def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
     svg = SVG.parse(svg_path)
 
@@ -502,6 +676,12 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
         tolerance = sampling.segment_tolerance
         clip_ref = _clip_reference(element)
         clip_geom = clip_geometries.get(clip_ref) if clip_ref else None
+
+        if isinstance(element, Image):
+            image_shapes = _image_to_shape_geometries(element, sampling, clip_geom)
+            if image_shapes:
+                shapes.extend(image_shapes)
+            continue
 
         is_text = isinstance(element, Text)
         path: Path | None = None

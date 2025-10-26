@@ -6,7 +6,7 @@ import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from shapely.geometry import (
     GeometryCollection,
@@ -29,6 +29,13 @@ from .preview import render_toolpaths
 from .svg_parser import ShapeGeometry, fit_shapes_to_bed, parse_svg
 
 logger = logging.getLogger(__name__)
+
+ProgressCallback = Callable[[str], None]
+
+
+def _notify(progress_update: Optional[ProgressCallback], message: str) -> None:
+    if progress_update:
+        progress_update(message)
 
 
 def _clean_geometry(geometry: BaseGeometry) -> BaseGeometry:
@@ -145,16 +152,31 @@ def _build_stroke_toolpaths(shape: ShapeGeometry, config: SlicerConfig) -> List[
     return toolpaths_from_polylines(loops, tag="outline", source_color=shape.color, brightness=shape.brightness)
 
 
-def _build_toolpaths(shapes: Iterable[ShapeGeometry], config: SlicerConfig) -> List[Toolpath]:
+def _build_toolpaths(
+    shapes: Iterable[ShapeGeometry],
+    config: SlicerConfig,
+    *,
+    progress_update: Optional[ProgressCallback] = None,
+) -> List[Toolpath]:
     toolpaths: List[Toolpath] = []
+    shape_list = list(shapes)
+    total_shapes = len(shape_list)
     perimeter_width = max(config.perimeter.thickness, 0.0)
     min_fill_width = max(config.perimeter.min_fill_width, 0.0)
-    for shape in shapes:
+    for index, shape in enumerate(shape_list, start=1):
         if shape.stroke_width is not None:
+            _notify(
+                progress_update,
+                f"Generating stroke outlines ({index}/{total_shapes})…",
+            )
             stroke_paths = _build_stroke_toolpaths(shape, config)
             toolpaths.extend(stroke_paths)
             continue
 
+        _notify(
+            progress_update,
+            f"Preparing fill geometry ({index}/{total_shapes})…",
+        )
         geometry = shape.geometry
         if geometry.is_empty:
             continue
@@ -180,6 +202,10 @@ def _build_toolpaths(shapes: Iterable[ShapeGeometry], config: SlicerConfig) -> L
 
             if perimeter_geom and not perimeter_geom.is_empty:
                 perimeter_geom = _clean_geometry(perimeter_geom)
+                _notify(
+                    progress_update,
+                    f"Generating perimeters ({index}/{total_shapes})…",
+                )
                 for per_poly in _geometry_to_polygons(perimeter_geom):
                     min_width = _min_dimension(per_poly)
                     target_width = max(perimeter_width, min_width)
@@ -208,6 +234,10 @@ def _build_toolpaths(shapes: Iterable[ShapeGeometry], config: SlicerConfig) -> L
                     max(perimeter_width, _min_dimension(polygon)),
                     config.sampling.outline_simplify_tolerance,
                 )
+                _notify(
+                    progress_update,
+                    f"Generating perimeters ({index}/{total_shapes})…",
+                )
                 toolpaths.extend(
                     toolpaths_from_polylines(
                         loops,
@@ -215,9 +245,13 @@ def _build_toolpaths(shapes: Iterable[ShapeGeometry], config: SlicerConfig) -> L
                         source_color=shape.color,
                         brightness=shape.brightness,
                     )
-                )
+                    )
 
             if interior_geom and not interior_geom.is_empty:
+                _notify(
+                    progress_update,
+                    f"Generating infill ({index}/{total_shapes})…",
+                )
                 interior_geom = _clean_geometry(interior_geom)
                 for infill_poly in _geometry_to_polygons(interior_geom):
                     infill_poly = _clean_geometry(infill_poly)
@@ -240,19 +274,28 @@ def generate_toolpaths_for_shapes(
     config: SlicerConfig,
     *,
     fit_to_bed: bool = True,
+    progress_update: Optional[ProgressCallback] = None,
 ) -> Tuple[List[Toolpath], float]:
     shape_list = list(shapes)
     if not shape_list:
         raise RuntimeError("No drawable shapes with fills were found in the SVG.")
 
+    _notify(progress_update, "Preparing shapes…")
     if fit_to_bed:
+        _notify(progress_update, "Fitting shapes to printable area…")
         fitted_shapes, scale_factor = fit_shapes_to_bed(shape_list, config.printer)
     else:
         fitted_shapes = shape_list
         scale_factor = 1.0
-    toolpaths = _build_toolpaths(fitted_shapes, config)
+    _notify(progress_update, "Generating toolpaths…")
+    toolpaths = _build_toolpaths(
+        fitted_shapes,
+        config,
+        progress_update=progress_update,
+    )
     if not toolpaths:
         raise RuntimeError("No toolpaths were generated from the SVG.")
+    _notify(progress_update, "Toolpaths ready.")
     return toolpaths, scale_factor
 
 
@@ -378,11 +421,19 @@ def _plan_color_sequence(toolpaths: List[Toolpath], config: SlicerConfig) -> Col
     return ColorPlan(ordered_colors=ordered_colors, groups=groups, usage_by_color=usage)
 
 
-def write_toolpaths_to_gcode(toolpaths: Iterable[Toolpath], output_path: Path, config: SlicerConfig) -> GcodeWriteResult:
+def write_toolpaths_to_gcode(
+    toolpaths: Iterable[Toolpath],
+    output_path: Path,
+    config: SlicerConfig,
+    *,
+    progress_update: Optional[ProgressCallback] = None,
+) -> GcodeWriteResult:
+    _notify(progress_update, "Preparing G-code generator…")
     toolpath_list = list(toolpaths)
     generator = GcodeGenerator(config.printer)
     generator.emit_header()
 
+    _notify(progress_update, "Planning color sequence…")
     color_plan = _plan_color_sequence(toolpath_list, config)
     color_order: List[str] = []
 
@@ -410,12 +461,14 @@ def write_toolpaths_to_gcode(toolpaths: Iterable[Toolpath], output_path: Path, c
     generator.emit_comment(f"Estimated plot time: {estimated_text}")
     generator.emit_footer()
 
+    _notify(progress_update, "Writing G-code to disk…")
     gcode_lines = generator.generate()
     output_path.write_text("\n".join(gcode_lines) + "\n", encoding="utf-8")
     logger.info("Wrote %d G-code lines to %s", len(gcode_lines), output_path)
     if color_order:
         logger.info("Color order: %s", " -> ".join(color_order))
     logger.info("Estimated plot time: %s (motion only)", estimated_text)
+    _notify(progress_update, "G-code saved.")
     return GcodeWriteResult(line_count=len(gcode_lines), color_order=color_order)
 
 

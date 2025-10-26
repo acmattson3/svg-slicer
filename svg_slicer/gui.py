@@ -1731,28 +1731,47 @@ class MainWindow(QMainWindow):
         if not self.config:
             QMessageBox.warning(self, "Configuration Missing", "Load a configuration before adding SVG files.")
             return
+        progress = QProgressDialog("Preparing import…", None, 0, 0, self)
+        progress.setWindowTitle("Importing SVGs")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.ApplicationModal)
+        progress.show()
+        QApplication.processEvents()
+
+        def update_progress(text: str) -> None:
+            progress.setLabelText(text)
+            QApplication.processEvents()
+
         added = 0
         selected_model: Optional[LoadedModel] = None
-        for name in filenames:
-            path = Path(name)
-            if not path.exists():
-                self._append_log(f"[WARNING] File not found: {path}")
-                continue
-            try:
-                shapes = parse_svg(str(path), self.config.sampling)
-            except Exception as exc:
-                self._append_log(f"[ERROR] Failed to parse {path.name}: {exc}")
-                continue
-            model = LoadedModel(path=path, original_shapes=shapes)
-            index = len(self.models)
-            self.models.append(model)
-            self._configure_model_for_printer(model, preserve_position=False, index=index)
-            self._append_log(f"[INFO] Added {path.name}")
-            added += 1
-            selected_model = model
-            if len(self.models) == 1:
-                suggested = path.with_suffix(".gcode")
-                self.prepare_tab.set_output_path(suggested)
+        try:
+            for name in filenames:
+                path = Path(name)
+                update_progress(f"Preparing {path.name}…")
+                if not path.exists():
+                    self._append_log(f"[WARNING] File not found: {path}")
+                    continue
+                try:
+                    update_progress(f"Parsing {path.name} geometry…")
+                    shapes = parse_svg(str(path), self.config.sampling)
+                except Exception as exc:
+                    self._append_log(f"[ERROR] Failed to parse {path.name}: {exc}")
+                    continue
+                model = LoadedModel(path=path, original_shapes=shapes)
+                index = len(self.models)
+                update_progress(f"Configuring {path.name} for printer…")
+                self.models.append(model)
+                self._configure_model_for_printer(model, preserve_position=False, index=index)
+                self._append_log(f"[INFO] Added {path.name}")
+                added += 1
+                selected_model = model
+                if len(self.models) == 1:
+                    suggested = path.with_suffix(".gcode")
+                    self.prepare_tab.set_output_path(suggested)
+                update_progress(f"{path.name} ready.")
+        finally:
+            progress.close()
+
         if added:
             if selected_model:
                 self._selected_model = selected_model
@@ -1809,15 +1828,25 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Geometry", "The queued SVGs do not contain drawable geometry.")
             return
 
-        progress = QProgressDialog("Generating toolpaths…", None, 0, 0, self)
+        progress = QProgressDialog("Preparing to slice…", None, 0, 0, self)
         progress.setWindowTitle("Slicing")
         progress.setCancelButton(None)
         progress.setWindowModality(Qt.ApplicationModal)
         progress.show()
         QApplication.processEvents()
 
+        def update_progress(text: str) -> None:
+            progress.setLabelText(text)
+            QApplication.processEvents()
+
         try:
-            toolpaths, _ = generate_toolpaths_for_shapes(shapes, self.config, fit_to_bed=False)
+            update_progress("Collecting shapes…")
+            toolpaths, _ = generate_toolpaths_for_shapes(
+                shapes,
+                self.config,
+                fit_to_bed=False,
+                progress_update=update_progress,
+            )
             if not toolpaths:
                 raise RuntimeError("No toolpaths were generated from the current placement.")
 
@@ -1827,9 +1856,13 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-            result = write_toolpaths_to_gcode(toolpaths, output_path, self.config)
+            result = write_toolpaths_to_gcode(
+                toolpaths,
+                output_path,
+                self.config,
+                progress_update=update_progress,
+            )
         except Exception as exc:
-            progress.close()
             QMessageBox.critical(self, "Slice Failed", f"Could not generate G-code:\n{exc}")
             self._append_log(f"[ERROR] Slice failed: {exc}")
             self.prepare_tab.set_status(f"Slicing failed: {exc}")
