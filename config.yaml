@@ -53,33 +53,30 @@ printers:
       width: 360.0
       depth: 360.0
     origin_offsets_mm:
-      x_min: 4.0
-      x_max: 209.0
-      y_min: 79.0
-      y_max: 296.0
+      x_min: 1.0
+      x_max: 208.0
+      y_min: 72.0
+      y_max: 290.0
     z_heights_mm:
-      draw: 17.0
-      travel: 19.0
-    z_lift_height_mm: 1.0
+      draw: 2.5
+      travel: 4.5
+    z_lift_height_mm: 2.0
     feedrates_mm_s:
       draw: 400.0
       travel: 400.0
-      z: 20.0
+      z: 40.0
     color_mode: false
     available_colors:
       - "#000000"
-      - "#FF5500"
-      - "#FFD700"
-      - "#00AEEF"
     pause_gcode:
       - "M600"
     start_gcode:
       - G21 ; use millimeters
       - G90 ; absolute positioning
       - G28 ; home all axes
-      - G1 Z39.000 F10500 ; lift pen to travel height
+      - G1 Z4.500 F10500 ; lift pen to travel height
       - P0 S1 ; Park XL Head
-      - G1 X0.000 Y66.000 F10500 ; move to front-left start
+      - G1 X1.000 Y70.000 F10500 ; move to front-left start
     end_gcode:
       - G1 Z39.000 F10500 ; lift pen
       - G1 X0.000 Y350.000 F10500 ; park at rear-left

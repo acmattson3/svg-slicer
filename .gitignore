@@ -1,3 +1,31 @@
-*.gcode
-*.pyc
+# Python cache/tooling
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated outputs
+*.gcode
+*.plot
+gcode_preview.png
+
+# Local one-off configs/saves
+good.yaml
+business-card.yaml
+*.local.yaml
+*-local.yaml
+
+# Local examples/workbench files
+examples/*.local.svg
+examples/i-love-katherine.svg
+
+# Local-only working files in this clone
+requirements.txt
+svg_slicer/handwriting_*.py
+tests/

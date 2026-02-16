@@ -6,7 +6,7 @@ Under the hood the slicer resolves fills, strokes, and text into geometry, appli
 
 ## Features
 
-- PySide6 GUI lets you drag-and-drop multiple SVGs, rescale and rotate each model with live footprint readouts, position artwork directly on the virtual build plate, and export the queued job to a single G-code file.
+- PySide6 GUI lets you drag-and-drop multiple SVGs, rescale and rotate each model with live footprint readouts, position artwork directly on the virtual build plate, duplicate selected models (`Ctrl+D`), undo placement edits (`Ctrl+Z`), save/load full arrangements as `.plot` layout files, and export the queued job to a single G-code file.
 - Built-in configuration editor loads/saves YAML printer profiles including bed limits, feedrates, start/end sequences, pause scripts, and colour palettes.
 - Palette-aware colour workflow maps SVG fills/strokes to the nearest configured colour, batches passes in least-used order, and inserts your pause script (default `M600`) while logging the planned colour order.
 - Black-and-white mode converts fills to grayscale, driving density-scaled cross-hatch infill with perimeter glides to minimise pen lifts while thick strokes receive dedicated outline passes.
@@ -65,9 +65,30 @@ python3 -m svg_slicer --config config.yaml
 - Provide `--printer-profile <name>` to open with a specific profile.
 - Drop SVG files onto the build plate or use **Add SVGs…**; each file is auto-fit to the printable area once on import.
 - Select a model to adjust scale (percent), rotation (degrees), and XY position; the footprint readout shows the post-scale bounds and warns if you exceed the printable window.
+- Use **Edit → Undo** (`Ctrl+Z`) to revert arrangement edits (move, scale, rotation, import, duplicate, delete, clear, and layout load).
+- Use **Edit → Duplicate Selected** (`Ctrl+D`) to clone one or more selected SVGs while preserving each model's current scale and rotation and offsetting position slightly for quick re-layout.
+- Use **File → Save Layout As…** / **File → Load Layout…** (`.plot`) to persist and restore queued SVG placement, scale, and rotation between sessions.
 - Set the destination path for the exported G-code and press **Slice** to generate toolpaths. The status bar and log window report line count, colour order (if applicable), and the estimated plot time.
 - Configure printer profiles, palettes, infill, and sampling values on the **Settings** tab, then apply or save back to YAML.
 - On Wayland-based WSL environments the app automatically switches Qt to the `xcb` backend to avoid protocol issues.
+
+### AI Handwriting Tab
+
+- The GUI ships with an **AI Handwriting** tab that pipes text through the handwriting synthesis model from the companion `handwriting-data` repository.
+- Clone `handwriting-data` alongside this project so the folder layout looks like:
+
+  ```
+  /path/to/workspace/
+    handwriting-data/
+    svg-slicer/
+  ```
+
+  Set the `SVG_SLICER_HANDWRITING_ROOT` environment variable if you keep the repository somewhere else.
+- The text box live-clamps input to the model's 75 character line limit and strips unsupported characters (based on `handwriting-synthesis/drawing.py`).
+- Press **Generate Preview** to launch `svg_slicer/handwriting_cli.py` in a new terminal window. The helper script checks for a Conda environment named `handwriting_tf1`, creates it with Python 3.5.2 if missing, installs the handwriting model requirements, and then runs `handwriting-synthesis/generate_from_text.py` to emit an SVG.
+- Generated files and the transient line buffer live in `~/.svg_slicer/handwriting/`. When the SVG finishes rendering the preview refreshes automatically and **Save Result…** lets you copy the file anywhere (e.g. back into the Prepare tab’s queue).
+- If the helper cannot find the sibling repository or cannot spawn a terminal, the status line calls it out so you can fix the setup before retrying.
+- Handwriting SVGs created by the model are detected automatically when you import them in either the GUI or CLI; the slicer treats them as ordered stroke paths rather than converting them into fills, so the toolpaths match the pen strokes exactly.
 
 ### CLI
 
@@ -86,6 +107,17 @@ Common flags:
 - `--log-level` adjusts verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`).
 
 The CLI reports the auto-fit scale factor, planned colour order, and motion-only time estimate in both the console and emitted G-code comments.
+
+## Testing
+
+Run the automated test suite with:
+
+```bash
+python3 -m pip install pytest
+pytest -q
+```
+
+The current suite includes unit tests for configuration parsing, SVG parsing/fit, infill generation, G-code and CLI behavior, handwriting helpers, preview export, and GUI layout history features (undo/duplicate/layout save-load).
 
 ## Scaling and Colour Behaviour
 

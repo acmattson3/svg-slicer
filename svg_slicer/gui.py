@@ -14,7 +14,7 @@ import yaml
 
 try:
     from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QTimer
-    from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+    from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPainterPath, QPen
     from PySide6.QtWidgets import (
         QApplication,
         QFileDialog,
@@ -34,6 +34,7 @@ try:
         QPushButton,
         QPlainTextEdit,
         QProgressDialog,
+        QScrollArea,
         QSizePolicy,
         QTabWidget,
         QVBoxLayout,
@@ -70,6 +71,8 @@ from .svg_parser import ShapeGeometry, parse_svg
 _LOGGER = logging.getLogger(__name__)
 
 _MIN_FIELD_HEIGHT = 28
+_MAX_UNDO_STATES = 100
+_LAYOUT_FILE_VERSION = 1
 
 
 def _running_in_wsl() -> bool:
@@ -311,6 +314,23 @@ def _toolpath_to_qcolor(toolpath: Toolpath) -> QColor:
     return QColor(gray, gray, gray)
 
 
+def _mirror_toolpaths_for_printer(toolpaths: Iterable[Toolpath], printer: PrinterConfig) -> List[Toolpath]:
+    y_sum = printer.y_min + printer.y_max
+    mirrored: List[Toolpath] = []
+    for toolpath in toolpaths:
+        mirrored_points = tuple((x, y_sum - y) for x, y in toolpath.points)
+        mirrored.append(
+            Toolpath(
+                points=mirrored_points,
+                tag=toolpath.tag,
+                source_color=toolpath.source_color,
+                assigned_color=toolpath.assigned_color,
+                brightness=toolpath.brightness,
+            )
+        )
+    return mirrored
+
+
 def build_model_path(shapes: Sequence[ShapeGeometry]) -> QPainterPath:
     painter_path = QPainterPath()
     for shape in shapes:
@@ -326,12 +346,15 @@ class ModelGraphicsItem(QGraphicsPathItem):
         model: LoadedModel,
         bed_rect: QRectF,
         moved_callback: Callable[[LoadedModel], None] | None,
+        drag_finished_callback: Callable[[LoadedModel, Tuple[float, float], Tuple[float, float]], None] | None,
     ) -> None:
         super().__init__()
         self.model = model
         self._bed_rect = bed_rect
         self._moved_callback = moved_callback
+        self._drag_finished_callback = drag_finished_callback
         self._color_paths: List[tuple[QColor, QPainterPath]] = []
+        self._drag_start_position: Optional[Tuple[float, float]] = None
 
         self.setFlags(
             QGraphicsItem.ItemIsSelectable
@@ -427,6 +450,28 @@ class ModelGraphicsItem(QGraphicsPathItem):
                 self._moved_callback(self.model)
         return super().itemChange(change, value)
 
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            self._drag_start_position = self.model.position
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        super().mouseReleaseEvent(event)
+        if event.button() != Qt.LeftButton:
+            self._drag_start_position = None
+            return
+        if self._drag_start_position is None:
+            return
+        previous_position = self._drag_start_position
+        self._drag_start_position = None
+        current_position = self.model.position
+        moved = not (
+            math.isclose(previous_position[0], current_position[0], abs_tol=1e-7)
+            and math.isclose(previous_position[1], current_position[1], abs_tol=1e-7)
+        )
+        if moved and self._drag_finished_callback:
+            self._drag_finished_callback(self.model, previous_position, current_position)
+
 class GuiLogHandler(logging.Handler):
     """Redirect logging records into the GUI text console."""
 
@@ -449,6 +494,7 @@ class BuildPlateView(QGraphicsView):
     svgDropped = Signal(list)
     arrangementChanged = Signal()
     modelSelected = Signal(object)
+    modelDragFinished = Signal(object, object, object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -529,7 +575,7 @@ class BuildPlateView(QGraphicsView):
     def add_model(self, model: LoadedModel) -> None:
         if not self._bed_rect or self._bed_rect.isNull():
             return
-        item = ModelGraphicsItem(model, self._bed_rect, self._on_model_moved)
+        item = ModelGraphicsItem(model, self._bed_rect, self._on_model_moved, self._on_model_drag_finished)
         self._scene.addItem(item)
         self._model_items.append(item)
         model.item = item
@@ -653,6 +699,14 @@ class BuildPlateView(QGraphicsView):
         self.clear_toolpaths()
         self.arrangementChanged.emit()
         self._update_info_visibility()
+
+    def _on_model_drag_finished(
+        self,
+        model: LoadedModel,
+        previous_position: Tuple[float, float],
+        current_position: Tuple[float, float],
+    ) -> None:
+        self.modelDragFinished.emit(model, previous_position, current_position)
 
     def _update_info_position(self) -> None:
         if not self._info_item or not self._bed_item:
@@ -981,7 +1035,16 @@ class SettingsTab(QWidget):
         self._updating_fields = False
         self._updating_profile = False
 
-        layout = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        root_layout.addWidget(scroll_area)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
+        scroll_area.setWidget(content_widget)
 
         self.profile_combo = QComboBox()
         self.profile_combo.setVisible(False)
@@ -1107,11 +1170,14 @@ class SettingsTab(QWidget):
 
         self.segment_tolerance_spin = self._make_spin(0.001, 10.0, 0.01, decimals=4)
         self.outline_tolerance_spin = self._make_spin(0.001, 10.0, 0.01, decimals=4)
+        self.curve_detail_scale_spin = self._make_spin(0.1, 20.0, 0.1, decimals=2)
         self._set_wide(self.segment_tolerance_spin)
         self._set_wide(self.outline_tolerance_spin)
+        self._set_wide(self.curve_detail_scale_spin)
 
         sampling_form.addRow("Segment tolerance (mm)", self.segment_tolerance_spin)
         sampling_form.addRow("Outline simplify (mm)", self.outline_tolerance_spin)
+        sampling_form.addRow("Curve detail scale", self.curve_detail_scale_spin)
 
         layout.addWidget(sampling_group)
 
@@ -1209,6 +1275,7 @@ class SettingsTab(QWidget):
         sampling = config.sampling
         self.segment_tolerance_spin.setValue(sampling.segment_tolerance)
         self.outline_tolerance_spin.setValue(sampling.outline_simplify_tolerance)
+        self.curve_detail_scale_spin.setValue(sampling.curve_detail_scale)
 
         rendering = config.rendering
         self.preview_line_width_spin.setValue(rendering.line_width)
@@ -1272,6 +1339,7 @@ class SettingsTab(QWidget):
         sampling = SamplingConfig(
             segment_tolerance=self.segment_tolerance_spin.value(),
             outline_simplify_tolerance=self.outline_tolerance_spin.value(),
+            curve_detail_scale=self.curve_detail_scale_spin.value(),
         )
 
         rendering = RenderingConfig(
@@ -1357,6 +1425,11 @@ class MainWindow(QMainWindow):
         self._current_toolpaths: List[Toolpath] = []
         self._selected_model: Optional[LoadedModel] = None
         self._selection_guard = False
+        self._undo_stack: List[dict[str, Any]] = []
+        self._history_suspended = False
+        self._undo_action: QAction | None = None
+        self._duplicate_action: QAction | None = None
+        self._remove_selected_action: QAction | None = None
 
         self._central_widget = QWidget()
         self.setCentralWidget(self._central_widget)
@@ -1392,6 +1465,22 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("&File")
 
+        load_layout_action = file_menu.addAction("Load Layout…")
+        load_layout_action.setShortcut(QKeySequence.Open)
+        load_layout_action.triggered.connect(self._prompt_load_layout)
+
+        save_layout_action = file_menu.addAction("Save Layout As…")
+        save_layout_action.setShortcut(QKeySequence.Save)
+        save_layout_action.triggered.connect(self._prompt_save_layout)
+
+        file_menu.addSeparator()
+
+        add_svgs_action = file_menu.addAction("Add SVGs…")
+        add_svgs_action.setShortcut(QKeySequence("Ctrl+I"))
+        add_svgs_action.triggered.connect(self._prompt_add_files)
+
+        file_menu.addSeparator()
+
         load_config_action = file_menu.addAction("Load Config…")
         load_config_action.triggered.connect(self._prompt_load_config)
 
@@ -1401,6 +1490,22 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         exit_action = file_menu.addAction("Exit")
         exit_action.triggered.connect(self.close)
+
+        edit_menu = menu_bar.addMenu("&Edit")
+
+        self._undo_action = edit_menu.addAction("Undo")
+        self._undo_action.setShortcut(QKeySequence.Undo)
+        self._undo_action.triggered.connect(self._undo_last_action)
+
+        self._duplicate_action = edit_menu.addAction("Duplicate Selected")
+        self._duplicate_action.setShortcut(QKeySequence("Ctrl+D"))
+        self._duplicate_action.triggered.connect(self._duplicate_selected_models)
+
+        self._remove_selected_action = edit_menu.addAction("Remove Selected")
+        self._remove_selected_action.setShortcut(QKeySequence.Delete)
+        self._remove_selected_action.triggered.connect(self._remove_selected_models)
+
+        self._refresh_action_states()
 
     def _wire_events(self) -> None:
         self.prepare_tab.filesDropped.connect(self._handle_files_added)
@@ -1416,6 +1521,7 @@ class MainWindow(QMainWindow):
         self.prepare_tab.rotationApplyRequested.connect(self._apply_rotation_from_ui)
         self.prepare_tab.rotationResetRequested.connect(self._reset_selected_model_rotation)
         self.prepare_tab.build_plate.modelSelected.connect(lambda model: self._set_selected_model(model, origin="plate"))
+        self.prepare_tab.build_plate.modelDragFinished.connect(self._on_model_drag_finished)
 
         self.settings_tab.configApplied.connect(self._apply_new_config)
         self.settings_tab.saveRequested.connect(self._save_config_as)
@@ -1423,6 +1529,178 @@ class MainWindow(QMainWindow):
 
     def _append_log(self, message: str) -> None:
         self.log_output.appendPlainText(message)
+
+    def _capture_layout_state(self, *, relative_to: Optional[Path] = None) -> dict[str, Any]:
+        models: List[dict[str, Any]] = []
+        for model in self.models:
+            path_text = str(model.path)
+            if relative_to is not None:
+                try:
+                    path_text = os.path.relpath(model.path, start=relative_to)
+                except Exception:
+                    path_text = str(model.path)
+            models.append(
+                {
+                    "path": path_text,
+                    "scale": float(model.scale),
+                    "initial_scale": float(model.initial_scale),
+                    "rotation_degrees": float(model.rotation_degrees),
+                    "position": [float(model.position[0]), float(model.position[1])],
+                }
+            )
+        return {
+            "version": _LAYOUT_FILE_VERSION,
+            "models": models,
+            "selected_index": self._selected_model_index(),
+        }
+
+    def _push_undo_state(self, snapshot: Optional[dict[str, Any]] = None) -> None:
+        if self._history_suspended:
+            return
+        state = self._capture_layout_state() if snapshot is None else snapshot
+        if self._undo_stack and self._undo_stack[-1] == state:
+            return
+        self._undo_stack.append(state)
+        if len(self._undo_stack) > _MAX_UNDO_STATES:
+            self._undo_stack.pop(0)
+        self._refresh_action_states()
+
+    @staticmethod
+    def _shape_list_copy(shapes: Sequence[ShapeGeometry]) -> List[ShapeGeometry]:
+        return [
+            ShapeGeometry(
+                geometry=shape.geometry,
+                brightness=shape.brightness,
+                stroke_width=shape.stroke_width,
+                color=shape.color,
+            )
+            for shape in shapes
+        ]
+
+    @staticmethod
+    def _parse_position(value: Any) -> Tuple[float, float]:
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            try:
+                return float(value[0]), float(value[1])
+            except (TypeError, ValueError):
+                return 0.0, 0.0
+        return 0.0, 0.0
+
+    def _models_from_layout_data(
+        self,
+        layout: dict[str, Any],
+        *,
+        base_dir: Optional[Path] = None,
+    ) -> tuple[List[LoadedModel], Optional[int]]:
+        if not self.config:
+            return [], None
+        raw_models = layout.get("models")
+        if not isinstance(raw_models, list):
+            return [], None
+
+        selected_raw = layout.get("selected_index")
+        selected_index: Optional[int] = selected_raw if isinstance(selected_raw, int) else None
+
+        loaded_models: List[LoadedModel] = []
+        index_map: dict[int, int] = {}
+        for original_index, record in enumerate(raw_models):
+            if not isinstance(record, dict):
+                continue
+            raw_path = record.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            path = Path(raw_path)
+            if base_dir is not None and not path.is_absolute():
+                path = (base_dir / path).resolve()
+            if not path.exists():
+                self._append_log(f"[WARNING] Skipping missing layout file: {path}")
+                continue
+            try:
+                shapes = parse_svg(str(path), self.config.sampling)
+            except Exception as exc:
+                self._append_log(f"[WARNING] Failed to load {path.name} from layout: {exc}")
+                continue
+
+            scale_value = record.get("scale", 1.0)
+            rotation_value = record.get("rotation_degrees", 0.0)
+            initial_scale_value = record.get("initial_scale", scale_value)
+            try:
+                scale = max(float(scale_value), 1e-6)
+            except (TypeError, ValueError):
+                scale = 1.0
+            try:
+                initial_scale = max(float(initial_scale_value), 1e-6)
+            except (TypeError, ValueError):
+                initial_scale = scale
+            try:
+                rotation = float(rotation_value)
+            except (TypeError, ValueError):
+                rotation = 0.0
+            position = self._parse_position(record.get("position"))
+
+            model = LoadedModel(
+                path=path,
+                original_shapes=shapes,
+                scale=scale,
+                initial_scale=initial_scale,
+                rotation_degrees=rotation,
+                position=position,
+            )
+            self._configure_model_for_printer(model, preserve_position=True, index=len(loaded_models))
+            loaded_models.append(model)
+            index_map[original_index] = len(loaded_models) - 1
+
+        mapped_selected_index = (
+            index_map[selected_index]
+            if selected_index is not None and selected_index in index_map
+            else (len(loaded_models) - 1 if loaded_models else None)
+        )
+        return loaded_models, mapped_selected_index
+
+    def _apply_layout_state(
+        self,
+        layout: dict[str, Any],
+        *,
+        base_dir: Optional[Path] = None,
+        status_message: Optional[str] = None,
+    ) -> None:
+        previous_guard = self._history_suspended
+        self._history_suspended = True
+        try:
+            models, selected_index = self._models_from_layout_data(layout, base_dir=base_dir)
+            self.models = models
+            if selected_index is not None and 0 <= selected_index < len(self.models):
+                self._selected_model = self.models[selected_index]
+            else:
+                self._selected_model = None
+            self._rebuild_model_views()
+            if status_message is not None:
+                self._invalidate_toolpaths(status_message)
+            elif self.models:
+                self._invalidate_toolpaths("Placement updated; slice to generate G-code.")
+            else:
+                self._invalidate_toolpaths("Queue is empty.")
+        finally:
+            self._history_suspended = previous_guard
+        self._refresh_action_states()
+
+    def _undo_last_action(self) -> None:
+        if not self._undo_stack:
+            return
+        state = self._undo_stack.pop()
+        self._apply_layout_state(state, status_message="Undo complete; slice to regenerate G-code.")
+        self.statusBar().showMessage("Undo complete", 3000)
+        self._refresh_action_states()
+
+    def _refresh_action_states(self) -> None:
+        can_undo = bool(self._undo_stack)
+        has_selection = bool(self.prepare_tab.selected_indices())
+        if self._undo_action is not None:
+            self._undo_action.setEnabled(can_undo)
+        if self._duplicate_action is not None:
+            self._duplicate_action.setEnabled(has_selection)
+        if self._remove_selected_action is not None:
+            self._remove_selected_action.setEnabled(has_selection)
 
     @staticmethod
     def _normalize_shapes(shapes: Sequence[ShapeGeometry]) -> Tuple[List[ShapeGeometry], float, float]:
@@ -1532,6 +1810,17 @@ class MainWindow(QMainWindow):
             if model.item:
                 self.prepare_tab.build_plate.update_model_item(model)
 
+    def _reload_model_geometries(self) -> None:
+        if not self.config:
+            return
+        for model in self.models:
+            try:
+                model.original_shapes = parse_svg(str(model.path), self.config.sampling)
+            except Exception as exc:
+                self._append_log(
+                    f"[WARNING] Could not reload geometry for {model.path.name} with updated sampling: {exc}"
+                )
+
     def _constrain_model_within_bed(self, model: LoadedModel) -> None:
         if not self.config:
             return
@@ -1562,6 +1851,7 @@ class MainWindow(QMainWindow):
         selected_index = self._selected_model_index()
         self.prepare_tab.refresh_models(self.models, selected_index=selected_index)
         self._update_selection_ui(origin="refresh")
+        self._refresh_action_states()
 
     def _selected_model_index(self) -> Optional[int]:
         if self._selected_model and self._selected_model in self.models:
@@ -1587,12 +1877,78 @@ class MainWindow(QMainWindow):
             self.prepare_tab.update_scale_controls(self._selected_model, pending_scale=pending_scale)
         finally:
             self._selection_guard = False
+        self._refresh_action_states()
 
     def _on_model_selection_from_list(self, index: int) -> None:
         if 0 <= index < len(self.models):
             self._set_selected_model(self.models[index], origin="list")
         else:
             self._set_selected_model(None, origin="list")
+
+    def _on_model_drag_finished(
+        self,
+        model: LoadedModel,
+        previous_position: Tuple[float, float],
+        current_position: Tuple[float, float],
+    ) -> None:
+        if self._history_suspended or model not in self.models:
+            return
+        moved = not (
+            math.isclose(previous_position[0], current_position[0], abs_tol=1e-7)
+            and math.isclose(previous_position[1], current_position[1], abs_tol=1e-7)
+        )
+        if not moved:
+            return
+        snapshot = self._capture_layout_state()
+        model_index = self.models.index(model)
+        snapshot_models = snapshot.get("models")
+        if isinstance(snapshot_models, list) and 0 <= model_index < len(snapshot_models):
+            model_state = snapshot_models[model_index]
+            if isinstance(model_state, dict):
+                model_state["position"] = [float(previous_position[0]), float(previous_position[1])]
+        self._push_undo_state(snapshot)
+        self._append_log(
+            f"[INFO] Moved {model.path.name} to ({current_position[0]:.1f}, {current_position[1]:.1f})"
+        )
+        self._refresh_action_states()
+
+    def _duplicate_selected_models(self) -> None:
+        if not self.config or not self.models:
+            return
+        selected_indices = sorted(set(self.prepare_tab.selected_indices()))
+        if not selected_indices:
+            selected_index = self._selected_model_index()
+            if selected_index is None:
+                return
+            selected_indices = [selected_index]
+        valid_indices = [index for index in selected_indices if 0 <= index < len(self.models)]
+        if not valid_indices:
+            return
+
+        self._push_undo_state()
+
+        printer = self.config.printer
+        base_offset = max(min(printer.printable_width, printer.printable_depth) * 0.03, 5.0)
+        new_models: List[LoadedModel] = []
+        for duplicate_number, source_index in enumerate(valid_indices, start=1):
+            source_model = self.models[source_index]
+            delta = base_offset * duplicate_number
+            clone = LoadedModel(
+                path=source_model.path,
+                original_shapes=self._shape_list_copy(source_model.original_shapes),
+                scale=source_model.scale,
+                initial_scale=source_model.initial_scale,
+                rotation_degrees=source_model.rotation_degrees,
+                position=(source_model.position[0] + delta, source_model.position[1] + delta),
+            )
+            self._configure_model_for_printer(clone, preserve_position=True, index=len(self.models) + len(new_models))
+            new_models.append(clone)
+
+        self.models.extend(new_models)
+        self._selected_model = new_models[-1] if new_models else self._selected_model
+        self._rebuild_model_views()
+        self._invalidate_toolpaths("Placement updated; slice to generate G-code.")
+        self._append_log(f"[INFO] Duplicated {len(new_models)} model(s).")
 
     def _apply_scale_from_ui(self, scale: float) -> None:
         if not self._selected_model:
@@ -1617,6 +1973,9 @@ class MainWindow(QMainWindow):
     def _apply_rotation_to_model(self, model: LoadedModel, rotation: float) -> None:
         if not self.config:
             return
+        undo_snapshot = self._capture_layout_state()
+        rotation_changed = not math.isclose(model.rotation_degrees, rotation, abs_tol=1e-7)
+        previous_position = model.position
 
         model.display_shapes()
         previous_width = model.bounding_width if model.bounding_width > 0 else model.width * model.scale
@@ -1636,6 +1995,13 @@ class MainWindow(QMainWindow):
         model.position = (new_x, new_y)
         self._constrain_model_within_bed(model)
 
+        position_changed = not (
+            math.isclose(previous_position[0], model.position[0], abs_tol=1e-7)
+            and math.isclose(previous_position[1], model.position[1], abs_tol=1e-7)
+        )
+        if rotation_changed or position_changed:
+            self._push_undo_state(undo_snapshot)
+
         if model.item:
             self.prepare_tab.build_plate.update_model_item(model)
 
@@ -1646,6 +2012,7 @@ class MainWindow(QMainWindow):
     def _apply_scale_to_model(self, model: LoadedModel, scale: float) -> None:
         if not self.config:
             return
+        undo_snapshot = self._capture_layout_state()
         requested_scale = max(scale, 1e-6)
         printer = self.config.printer
         base_width, base_height = model.footprint_dimensions(scale=1.0, rotation=model.rotation_degrees)
@@ -1660,6 +2027,7 @@ class MainWindow(QMainWindow):
 
         model.display_shapes()
         current_scale = model.scale if model.scale > 0 else model.initial_scale
+        previous_position = model.position
         previous_width = model.bounding_width if model.bounding_width > 0 else model.width * current_scale
         previous_height = model.bounding_height if model.bounding_height > 0 else model.height * current_scale
         centre_x = model.position[0] + (previous_width / 2.0 if previous_width > 0 else 0.0)
@@ -1677,6 +2045,14 @@ class MainWindow(QMainWindow):
         model.position = (new_x, new_y)
         self._constrain_model_within_bed(model)
 
+        scale_changed = not math.isclose(current_scale, model.scale, abs_tol=1e-7)
+        position_changed = not (
+            math.isclose(previous_position[0], model.position[0], abs_tol=1e-7)
+            and math.isclose(previous_position[1], model.position[1], abs_tol=1e-7)
+        )
+        if scale_changed or position_changed:
+            self._push_undo_state(undo_snapshot)
+
         if model.item:
             self.prepare_tab.build_plate.update_model_item(model)
 
@@ -1691,6 +2067,8 @@ class MainWindow(QMainWindow):
             self.prepare_tab.set_status(message)
 
     def _on_arrangement_changed(self) -> None:
+        if self._history_suspended:
+            return
         if not self.models:
             return
         self._invalidate_toolpaths("Placement updated; slice to generate G-code.")
@@ -1727,10 +2105,82 @@ class MainWindow(QMainWindow):
         if output_path:
             self.prepare_tab.set_output_path(Path(output_path))
 
+    def _prompt_save_layout(self) -> None:
+        default_name = "layout.plot"
+        if self.models:
+            default_name = f"{self.models[0].path.stem}.plot"
+        start_path = Path.cwd() / default_name
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Layout",
+            str(start_path),
+            "Plot Layout (*.plot);;YAML Files (*.yaml *.yml);;All Files (*)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        snapshot = self._capture_layout_state(relative_to=path.parent)
+        payload = {
+            "format": "svg-slicer-layout",
+            "version": _LAYOUT_FILE_VERSION,
+            "layout": snapshot,
+            "config_path": str(self.config_path) if self.config_path else "",
+            "config_profile": self.config_profile or "",
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8") as fh:
+                yaml.safe_dump(payload, fh, sort_keys=False)
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Failed", f"Could not save layout:\n{exc}")
+            self._append_log(f"[ERROR] Failed to save layout: {exc}")
+            return
+        self.statusBar().showMessage(f"Layout saved to {path}", 5000)
+        self.prepare_tab.set_status(f"Layout saved to {path}")
+        self._append_log(f"[INFO] Saved layout to {path}.")
+
+    def _prompt_load_layout(self) -> None:
+        if not self.config:
+            QMessageBox.warning(self, "Configuration Missing", "Load a configuration before opening a layout.")
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Layout",
+            str(Path.cwd()),
+            "Plot Layout (*.plot);;YAML Files (*.yaml *.yml);;All Files (*)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                payload = yaml.safe_load(fh) or {}
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Failed", f"Could not read layout:\n{exc}")
+            self._append_log(f"[ERROR] Failed to read layout: {exc}")
+            return
+        if not isinstance(payload, dict):
+            QMessageBox.critical(self, "Load Failed", "Layout file is not a valid mapping.")
+            return
+        layout = payload.get("layout", payload)
+        if not isinstance(layout, dict):
+            QMessageBox.critical(self, "Load Failed", "Layout content is invalid.")
+            return
+
+        self._push_undo_state()
+        self._apply_layout_state(
+            layout,
+            base_dir=path.parent,
+            status_message="Layout loaded; slice to regenerate G-code.",
+        )
+        self._append_log(f"[INFO] Loaded layout from {path}.")
+        self.statusBar().showMessage(f"Loaded layout: {path}", 5000)
+
     def _handle_files_added(self, filenames: Iterable[str]) -> None:
         if not self.config:
             QMessageBox.warning(self, "Configuration Missing", "Load a configuration before adding SVG files.")
             return
+        undo_snapshot = self._capture_layout_state()
         progress = QProgressDialog("Preparing import…", None, 0, 0, self)
         progress.setWindowTitle("Importing SVGs")
         progress.setCancelButton(None)
@@ -1744,6 +2194,7 @@ class MainWindow(QMainWindow):
 
         added = 0
         selected_model: Optional[LoadedModel] = None
+        undo_recorded = False
         try:
             for name in filenames:
                 path = Path(name)
@@ -1760,6 +2211,9 @@ class MainWindow(QMainWindow):
                 model = LoadedModel(path=path, original_shapes=shapes)
                 index = len(self.models)
                 update_progress(f"Configuring {path.name} for printer…")
+                if not undo_recorded:
+                    self._push_undo_state(undo_snapshot)
+                    undo_recorded = True
                 self.models.append(model)
                 self._configure_model_for_printer(model, preserve_position=False, index=index)
                 self._append_log(f"[INFO] Added {path.name}")
@@ -1784,9 +2238,14 @@ class MainWindow(QMainWindow):
         indices = sorted(self.prepare_tab.selected_indices(), reverse=True)
         if not indices:
             return
+        undo_snapshot = self._capture_layout_state()
+        undo_recorded = False
         removed_any = False
         for index in indices:
             if 0 <= index < len(self.models):
+                if not undo_recorded:
+                    self._push_undo_state(undo_snapshot)
+                    undo_recorded = True
                 removed = self.models.pop(index)
                 self._append_log(f"[INFO] Removed {removed.path.name}")
                 removed_any = True
@@ -1807,6 +2266,7 @@ class MainWindow(QMainWindow):
     def _clear_models(self) -> None:
         if not self.models:
             return
+        self._push_undo_state()
         self.models.clear()
         self._selected_model = None
         self._rebuild_model_views()
@@ -1849,6 +2309,7 @@ class MainWindow(QMainWindow):
             )
             if not toolpaths:
                 raise RuntimeError("No toolpaths were generated from the current placement.")
+            export_toolpaths = _mirror_toolpaths_for_printer(toolpaths, self.config.printer)
 
             output_path = self.prepare_tab.output_path()
             try:
@@ -1857,7 +2318,7 @@ class MainWindow(QMainWindow):
                 pass
 
             result = write_toolpaths_to_gcode(
-                toolpaths,
+                export_toolpaths,
                 output_path,
                 self.config,
                 progress_update=update_progress,
@@ -1886,6 +2347,7 @@ class MainWindow(QMainWindow):
     def _apply_new_config(self, config: SlicerConfig) -> None:
         self.config = config
         self.prepare_tab.set_printer(config.printer)
+        self._reload_model_geometries()
         self._reconfigure_all_models(preserve_positions=True)
         self._rebuild_model_views()
         message = f"Updated configuration for printer '{config.printer.name}'."
@@ -1948,6 +2410,7 @@ class MainWindow(QMainWindow):
 
         self.settings_tab.set_config(config, profiles, current_profile)
         self.prepare_tab.set_printer(config.printer)
+        self._reload_model_geometries()
         self._reconfigure_all_models(preserve_positions=True)
         self._rebuild_model_views()
         self._append_log(
@@ -2005,6 +2468,7 @@ class MainWindow(QMainWindow):
             "sampling": {
                 "segment_length_tolerance_mm": config.sampling.segment_tolerance,
                 "outline_simplify_tolerance_mm": config.sampling.outline_simplify_tolerance,
+                "curve_detail_scale": config.sampling.curve_detail_scale,
             },
             "rendering": {
                 "preview_line_width_mm": config.rendering.line_width,
