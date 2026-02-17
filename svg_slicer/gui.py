@@ -37,6 +37,7 @@ try:
         QScrollArea,
         QSplitter,
         QSizePolicy,
+        QSpinBox,
         QTabWidget,
         QVBoxLayout,
         QWidget,
@@ -829,6 +830,8 @@ class PrepareTab(QWidget):
         self.build_plate.svgDropped.connect(self.filesDropped)
         self._ignore_list_signal = False
         self._current_model: Optional[LoadedModel] = None
+        self._updating_dimension_spins = False
+        self._last_dimension_edit: Optional[str] = None
 
         self.printer_label = QLabel("Printer: —")
         self.scale_label = QLabel("Models: 0")
@@ -901,8 +904,31 @@ class PrepareTab(QWidget):
 
         controls.addLayout(rotation_row)
 
-        self.dimensions_label = QLabel("Footprint: —")
-        controls.addWidget(self.dimensions_label)
+        controls.addSpacing(8)
+        controls.addWidget(QLabel("Model footprint (mm):"))
+
+        footprint_row = QHBoxLayout()
+        self.footprint_width_spin = QDoubleSpinBox()
+        self.footprint_width_spin.setRange(0.001, 10000.0)
+        self.footprint_width_spin.setDecimals(3)
+        self.footprint_width_spin.setSingleStep(0.1)
+        self.footprint_width_spin.setEnabled(False)
+        footprint_row.addWidget(self.footprint_width_spin)
+
+        footprint_row.addWidget(QLabel("×"))
+
+        self.footprint_height_spin = QDoubleSpinBox()
+        self.footprint_height_spin.setRange(0.001, 10000.0)
+        self.footprint_height_spin.setDecimals(3)
+        self.footprint_height_spin.setSingleStep(0.1)
+        self.footprint_height_spin.setEnabled(False)
+        footprint_row.addWidget(self.footprint_height_spin)
+
+        self.footprint_apply_button = QPushButton("Apply")
+        self.footprint_apply_button.setEnabled(False)
+        footprint_row.addWidget(self.footprint_apply_button)
+
+        controls.addLayout(footprint_row)
 
         button_row = QHBoxLayout()
         button_row.addWidget(self.add_button)
@@ -928,6 +954,8 @@ class PrepareTab(QWidget):
 
         self.scale_spin.valueChanged.connect(self._on_scale_value_changed)
         self.rotation_spin.valueChanged.connect(self._on_rotation_value_changed)
+        self.footprint_width_spin.valueChanged.connect(self._on_footprint_width_changed)
+        self.footprint_height_spin.valueChanged.connect(self._on_footprint_height_changed)
 
         self.add_button.clicked.connect(self.addFilesRequested)
         self.remove_button.clicked.connect(self.removeSelectionRequested)
@@ -939,6 +967,7 @@ class PrepareTab(QWidget):
         self.scale_reset_button.clicked.connect(lambda: self.scaleResetRequested.emit())
         self.rotation_apply_button.clicked.connect(self._emit_rotation_apply)
         self.rotation_reset_button.clicked.connect(lambda: self.rotationResetRequested.emit())
+        self.footprint_apply_button.clicked.connect(self._emit_scale_apply)
 
     def set_printer(self, printer: PrinterConfig) -> None:
         self.build_plate.set_printer(printer)
@@ -993,6 +1022,7 @@ class PrepareTab(QWidget):
 
     def update_scale_controls(self, model: Optional[LoadedModel], pending_scale: Optional[float] = None) -> None:
         self._current_model = model
+        self._last_dimension_edit = None
         if not model:
             self.scale_spin.setEnabled(False)
             self.scale_apply_button.setEnabled(False)
@@ -1000,13 +1030,16 @@ class PrepareTab(QWidget):
             self.rotation_spin.setEnabled(False)
             self.rotation_apply_button.setEnabled(False)
             self.rotation_reset_button.setEnabled(False)
-            self.dimensions_label.setText("Footprint: —")
+            self.footprint_width_spin.setEnabled(False)
+            self.footprint_height_spin.setEnabled(False)
+            self.footprint_apply_button.setEnabled(False)
             self.scale_spin.blockSignals(True)
             self.scale_spin.setValue(100.0)
             self.scale_spin.blockSignals(False)
             self.rotation_spin.blockSignals(True)
             self.rotation_spin.setValue(0.0)
             self.rotation_spin.blockSignals(False)
+            self._set_footprint_spins(0.0, 0.0)
             return
 
         scale_value = pending_scale if pending_scale is not None else model.scale
@@ -1027,12 +1060,12 @@ class PrepareTab(QWidget):
 
         self.rotation_apply_button.setEnabled(True)
         self.rotation_reset_button.setEnabled(True)
+        self.footprint_width_spin.setEnabled(True)
+        self.footprint_height_spin.setEnabled(True)
+        self.footprint_apply_button.setEnabled(True)
 
         width, height = model.footprint_dimensions(scale=scale_value, rotation=rotation_value)
-        if width > 0 and height > 0:
-            self.dimensions_label.setText(f"Footprint: {width:.1f} × {height:.1f} mm")
-        else:
-            self.dimensions_label.setText("Footprint: —")
+        self._set_footprint_spins(width, height)
 
     def _on_list_selection_changed(self) -> None:
         if self._ignore_list_signal:
@@ -1050,12 +1083,7 @@ class PrepareTab(QWidget):
         if not self.scale_spin.isEnabled() or not self._current_model:
             return
         scale_value = value / 100.0
-        rotation_value = self.rotation_spin.value()
-        width, height = self._current_model.footprint_dimensions(scale=scale_value, rotation=rotation_value)
-        if width > 0 and height > 0:
-            self.dimensions_label.setText(f"Footprint: {width:.1f} × {height:.1f} mm")
-        else:
-            self.dimensions_label.setText("Footprint: —")
+        self._update_footprint_for_scale(scale_value)
 
     def _emit_rotation_apply(self) -> None:
         if not self.rotation_spin.isEnabled():
@@ -1066,11 +1094,63 @@ class PrepareTab(QWidget):
         if not self.rotation_spin.isEnabled() or not self._current_model:
             return
         scale_value = self.scale_spin.value() / 100.0
-        width, height = self._current_model.footprint_dimensions(scale=scale_value, rotation=value)
-        if width > 0 and height > 0:
-            self.dimensions_label.setText(f"Footprint: {width:.1f} × {height:.1f} mm")
-        else:
-            self.dimensions_label.setText("Footprint: —")
+        self._update_footprint_for_scale(scale_value)
+
+    def _set_footprint_spins(self, width: float, height: float) -> None:
+        self._updating_dimension_spins = True
+        try:
+            safe_width = max(width, 0.001) if width > 0 else 0.001
+            safe_height = max(height, 0.001) if height > 0 else 0.001
+            self.footprint_width_spin.blockSignals(True)
+            self.footprint_width_spin.setValue(safe_width)
+            self.footprint_width_spin.blockSignals(False)
+            self.footprint_height_spin.blockSignals(True)
+            self.footprint_height_spin.setValue(safe_height)
+            self.footprint_height_spin.blockSignals(False)
+        finally:
+            self._updating_dimension_spins = False
+
+    def _update_footprint_for_scale(self, scale_value: float) -> None:
+        if not self._current_model:
+            return
+        rotation_value = self.rotation_spin.value()
+        width, height = self._current_model.footprint_dimensions(scale=scale_value, rotation=rotation_value)
+        self._set_footprint_spins(width, height)
+
+    def _base_footprint_dimensions(self) -> Tuple[float, float]:
+        if not self._current_model:
+            return 0.0, 0.0
+        return self._current_model.footprint_dimensions(scale=1.0, rotation=self.rotation_spin.value())
+
+    def _pending_scale_from_dimension(self, source: str, value: float) -> Optional[float]:
+        base_width, base_height = self._base_footprint_dimensions()
+        if source == "width" and base_width > 0:
+            return max(value, 1e-6) / base_width
+        if source == "height" and base_height > 0:
+            return max(value, 1e-6) / base_height
+        return None
+
+    def _update_pending_scale_from_dimension(self, source: str, value: float) -> None:
+        if self._updating_dimension_spins or not self._current_model:
+            return
+        scale_value = self._pending_scale_from_dimension(source, value)
+        if scale_value is None:
+            return
+        self._last_dimension_edit = source
+        self.scale_spin.blockSignals(True)
+        self.scale_spin.setValue(scale_value * 100.0)
+        self.scale_spin.blockSignals(False)
+        self._update_footprint_for_scale(scale_value)
+
+    def _on_footprint_width_changed(self, value: float) -> None:
+        if not self.footprint_width_spin.isEnabled():
+            return
+        self._update_pending_scale_from_dimension("width", value)
+
+    def _on_footprint_height_changed(self, value: float) -> None:
+        if not self.footprint_height_spin.isEnabled():
+            return
+        self._update_pending_scale_from_dimension("height", value)
 
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)
@@ -1215,15 +1295,23 @@ class SettingsTab(QWidget):
         perimeter_group.setLayout(perimeter_form)
 
         self.perimeter_thickness_spin = self._make_spin(0.0, 10.0, 0.01, decimals=3)
-        self.perimeter_density_spin = self._make_spin(0.0, 5.0, 0.01, decimals=3)
+        self.perimeter_count_spin = QSpinBox()
+        self.perimeter_count_spin.setRange(1, 50)
+        self.perimeter_count_spin.setSingleStep(1)
+        self.perimeter_count_spin.setAlignment(Qt.AlignRight)
         self.perimeter_min_fill_spin = self._make_spin(0.0, 10.0, 0.01, decimals=3)
+        self.perimeter_min_fill_mode_combo = QComboBox()
+        self.perimeter_min_fill_mode_combo.addItem("Minimum dimension", "min")
+        self.perimeter_min_fill_mode_combo.addItem("Any dimension", "max")
         self._set_wide(self.perimeter_thickness_spin)
-        self._set_wide(self.perimeter_density_spin)
+        self._set_wide(self.perimeter_count_spin)
         self._set_wide(self.perimeter_min_fill_spin)
+        self._set_wide(self.perimeter_min_fill_mode_combo)
 
         perimeter_form.addRow("Thickness (mm)", self.perimeter_thickness_spin)
-        perimeter_form.addRow("Density", self.perimeter_density_spin)
+        perimeter_form.addRow("Count", self.perimeter_count_spin)
         perimeter_form.addRow("Min fill width (mm)", self.perimeter_min_fill_spin)
+        perimeter_form.addRow("Min fill mode", self.perimeter_min_fill_mode_combo)
 
         layout.addWidget(perimeter_group)
 
@@ -1332,8 +1420,10 @@ class SettingsTab(QWidget):
 
         perimeter = config.perimeter
         self.perimeter_thickness_spin.setValue(perimeter.thickness)
-        self.perimeter_density_spin.setValue(perimeter.density)
+        self.perimeter_count_spin.setValue(perimeter.count)
         self.perimeter_min_fill_spin.setValue(perimeter.min_fill_width)
+        mode_index = self.perimeter_min_fill_mode_combo.findData(perimeter.min_fill_mode)
+        self.perimeter_min_fill_mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
 
         sampling = config.sampling
         self.segment_tolerance_spin.setValue(sampling.segment_tolerance)
@@ -1395,8 +1485,9 @@ class SettingsTab(QWidget):
 
         perimeter = PerimeterConfig(
             thickness=self.perimeter_thickness_spin.value(),
-            density=self.perimeter_density_spin.value(),
+            count=self.perimeter_count_spin.value(),
             min_fill_width=self.perimeter_min_fill_spin.value(),
+            min_fill_mode=str(self.perimeter_min_fill_mode_combo.currentData() or "min"),
         )
 
         sampling = SamplingConfig(
@@ -1600,6 +1691,24 @@ class MainWindow(QMainWindow):
     def _append_log(self, message: str) -> None:
         self.log_output.appendPlainText(message)
 
+    def _start_progress_dialog(
+        self,
+        title: str,
+        initial_label: str,
+    ) -> tuple[QProgressDialog, Callable[[str], None]]:
+        progress = QProgressDialog(initial_label, None, 0, 0, self)
+        progress.setWindowTitle(title)
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.ApplicationModal)
+        progress.show()
+        QApplication.processEvents()
+
+        def update(text: str) -> None:
+            progress.setLabelText(text)
+            QApplication.processEvents()
+
+        return progress, update
+
     def _capture_layout_state(self, *, relative_to: Optional[Path] = None) -> dict[str, Any]:
         models: List[dict[str, Any]] = []
         for model in self.models:
@@ -1661,12 +1770,14 @@ class MainWindow(QMainWindow):
         layout: dict[str, Any],
         *,
         base_dir: Optional[Path] = None,
+        progress_update: Optional[Callable[[str], None]] = None,
     ) -> tuple[List[LoadedModel], Optional[int]]:
         if not self.config:
             return [], None
         raw_models = layout.get("models")
         if not isinstance(raw_models, list):
             return [], None
+        total_records = len(raw_models)
 
         selected_raw = layout.get("selected_index")
         selected_index: Optional[int] = selected_raw if isinstance(selected_raw, int) else None
@@ -1674,6 +1785,8 @@ class MainWindow(QMainWindow):
         loaded_models: List[LoadedModel] = []
         index_map: dict[int, int] = {}
         for original_index, record in enumerate(raw_models):
+            if progress_update:
+                progress_update(f"Loading layout models ({original_index + 1}/{total_records})…")
             if not isinstance(record, dict):
                 continue
             raw_path = record.get("path")
@@ -1716,6 +1829,8 @@ class MainWindow(QMainWindow):
                 rotation_degrees=rotation,
                 position=position,
             )
+            if progress_update:
+                progress_update(f"Applying layout transform for {path.name}…")
             self._configure_model_for_printer(model, preserve_position=True, index=len(loaded_models))
             loaded_models.append(model)
             index_map[original_index] = len(loaded_models) - 1
@@ -1733,16 +1848,23 @@ class MainWindow(QMainWindow):
         *,
         base_dir: Optional[Path] = None,
         status_message: Optional[str] = None,
+        progress_update: Optional[Callable[[str], None]] = None,
     ) -> None:
         previous_guard = self._history_suspended
         self._history_suspended = True
         try:
-            models, selected_index = self._models_from_layout_data(layout, base_dir=base_dir)
+            models, selected_index = self._models_from_layout_data(
+                layout,
+                base_dir=base_dir,
+                progress_update=progress_update,
+            )
             self.models = models
             if selected_index is not None and 0 <= selected_index < len(self.models):
                 self._selected_model = self.models[selected_index]
             else:
                 self._selected_model = None
+            if progress_update:
+                progress_update("Refreshing build plate…")
             self._rebuild_model_views()
             if status_message is not None:
                 self._invalidate_toolpaths(status_message)
@@ -1874,16 +1996,26 @@ class MainWindow(QMainWindow):
         model.position = (x, y)
         self._constrain_model_within_bed(model)
 
-    def _reconfigure_all_models(self, preserve_positions: bool = True) -> None:
+    def _reconfigure_all_models(
+        self,
+        preserve_positions: bool = True,
+        progress_update: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        total_models = len(self.models)
         for idx, model in enumerate(self.models):
+            if progress_update:
+                progress_update(f"Reconfiguring models ({idx + 1}/{total_models})…")
             self._configure_model_for_printer(model, preserve_position=preserve_positions, index=idx)
             if model.item:
                 self.prepare_tab.build_plate.update_model_item(model)
 
-    def _reload_model_geometries(self) -> None:
+    def _reload_model_geometries(self, progress_update: Optional[Callable[[str], None]] = None) -> None:
         if not self.config:
             return
-        for model in self.models:
+        total_models = len(self.models)
+        for idx, model in enumerate(self.models):
+            if progress_update:
+                progress_update(f"Reloading SVG geometry ({idx + 1}/{total_models})…")
             try:
                 model.original_shapes = parse_svg(str(model.path), self.config.sampling)
             except Exception as exc:
@@ -2237,12 +2369,17 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load Failed", "Layout content is invalid.")
             return
 
-        self._push_undo_state()
-        self._apply_layout_state(
-            layout,
-            base_dir=path.parent,
-            status_message="Layout loaded; slice to regenerate G-code.",
-        )
+        progress, update_progress = self._start_progress_dialog("Loading Layout", "Preparing layout…")
+        try:
+            self._push_undo_state()
+            self._apply_layout_state(
+                layout,
+                base_dir=path.parent,
+                status_message="Layout loaded; slice to regenerate G-code.",
+                progress_update=update_progress,
+            )
+        finally:
+            progress.close()
         self._append_log(f"[INFO] Loaded layout from {path}.")
         self.statusBar().showMessage(f"Loaded layout: {path}", 5000)
 
@@ -2416,10 +2553,17 @@ class MainWindow(QMainWindow):
 
     def _apply_new_config(self, config: SlicerConfig) -> None:
         self.config = config
-        self.prepare_tab.set_printer(config.printer)
-        self._reload_model_geometries()
-        self._reconfigure_all_models(preserve_positions=True)
-        self._rebuild_model_views()
+        progress, update_progress = self._start_progress_dialog("Applying Settings", "Applying settings…")
+        try:
+            update_progress("Updating printer profile…")
+            self.prepare_tab.set_printer(config.printer)
+            if self.models:
+                self._reload_model_geometries(progress_update=update_progress)
+                self._reconfigure_all_models(preserve_positions=True, progress_update=update_progress)
+            update_progress("Refreshing view…")
+            self._rebuild_model_views()
+        finally:
+            progress.close()
         message = f"Updated configuration for printer '{config.printer.name}'."
         self._append_log(f"[INFO] {message}")
         self._invalidate_toolpaths("Configuration updated; slice to regenerate G-code.")
@@ -2532,8 +2676,9 @@ class MainWindow(QMainWindow):
             },
             "perimeter": {
                 "thickness_mm": config.perimeter.thickness,
-                "density": config.perimeter.density,
+                "count": config.perimeter.count,
                 "min_fill_width_mm": config.perimeter.min_fill_width,
+                "min_fill_mode": config.perimeter.min_fill_mode,
             },
             "sampling": {
                 "segment_length_tolerance_mm": config.sampling.segment_tolerance,

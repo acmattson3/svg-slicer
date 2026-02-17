@@ -93,6 +93,22 @@ def _ring_to_polyline(ring: LinearRing, tolerance: float) -> List[tuple[float, f
     return [(float(x), float(y)) for x, y in simplified_coords]
 
 
+def _max_dimension(polygon: Polygon) -> float:
+    if polygon.is_empty:
+        return 0.0
+    rect = polygon.minimum_rotated_rectangle
+    coords = list(rect.exterior.coords)
+    if len(coords) < 2:
+        return 0.0
+    edges = [
+        LineString([coords[i], coords[i + 1]]).length
+        for i in range(len(coords) - 1)
+    ]
+    if not edges:
+        return 0.0
+    return max(edges)
+
+
 def _min_dimension(polygon: Polygon) -> float:
     if polygon.is_empty:
         return 0.0
@@ -109,20 +125,33 @@ def _min_dimension(polygon: Polygon) -> float:
     return min(edges)
 
 
-def _max_dimension(polygon: Polygon) -> float:
+def _fill_dimension(polygon: Polygon, mode: str) -> float:
+    return _max_dimension(polygon) if mode == "max" else _min_dimension(polygon)
+
+
+def _select_infill_regions(
+    polygon: Polygon,
+    min_fill_width: float,
+    min_fill_mode: str,
+) -> List[Polygon]:
+    polygon = _clean_geometry(polygon)
     if polygon.is_empty:
-        return 0.0
-    rect = polygon.minimum_rotated_rectangle
-    coords = list(rect.exterior.coords)
-    if len(coords) < 2:
-        return 0.0
-    edges = [
-        LineString([coords[i], coords[i + 1]]).length
-        for i in range(len(coords) - 1)
-    ]
-    if not edges:
-        return 0.0
-    return max(edges)
+        return []
+
+    if min_fill_width <= 0:
+        return _geometry_to_polygons(polygon)
+
+    if min_fill_mode == "max":
+        return [polygon] if _fill_dimension(polygon, min_fill_mode) >= min_fill_width else []
+
+    # "min" mode: keep only locally wide-enough regions using an opening operation.
+    radius = max(min_fill_width / 2.0, 1e-6)
+    eroded = _clean_geometry(polygon.buffer(-radius))
+    if eroded.is_empty:
+        return []
+    reopened = _clean_geometry(eroded.buffer(radius))
+    clipped = _clean_geometry(reopened.intersection(polygon))
+    return [part for part in _geometry_to_polygons(clipped) if not part.is_empty and part.area > 0]
 
 
 def _generate_perimeter_loops(
@@ -178,7 +207,11 @@ def _build_toolpaths(
     shape_list = list(shapes)
     total_shapes = len(shape_list)
     perimeter_width = max(config.perimeter.thickness, 0.0)
+    perimeter_count = max(int(config.perimeter.count), 1)
     min_fill_width = max(config.perimeter.min_fill_width, 0.0)
+    min_fill_mode = str(config.perimeter.min_fill_mode).strip().lower()
+    if min_fill_mode not in {"min", "max"}:
+        min_fill_mode = "min"
     for index, shape in enumerate(shape_list, start=1):
         if shape.stroke_width is not None:
             _notify(
@@ -204,55 +237,19 @@ def _build_toolpaths(
         density = _brightness_to_density(shape.brightness, config)
         for polygon in polygons:
             polygon = _clean_geometry(polygon)
-            perimeter_geom: BaseGeometry | None = None
             interior_geom: BaseGeometry | None = polygon
 
             if perimeter_width > 0:
-                inner = _clean_geometry(polygon.buffer(-perimeter_width))
-                if inner.is_empty:
-                    perimeter_geom = polygon
-                    interior_geom = None
-                else:
-                    perimeter_geom = _clean_geometry(polygon.difference(inner))
-                    interior_geom = inner
-
-            if perimeter_geom and not perimeter_geom.is_empty:
-                perimeter_geom = _clean_geometry(perimeter_geom)
+                perimeter_target_width = perimeter_width * perimeter_count
                 _notify(
                     progress_update,
                     f"Generating perimeters ({index}/{total_shapes})…",
                 )
-                for per_poly in _geometry_to_polygons(perimeter_geom):
-                    min_width = _min_dimension(per_poly)
-                    target_width = max(perimeter_width, min_width)
-
-                    loops = _generate_perimeter_loops(
-                        per_poly,
-                        perimeter_width,
-                        target_width,
-                        config.sampling.outline_simplify_tolerance,
-                    )
-                    toolpaths.extend(
-                        toolpaths_from_polylines(
-                            loops,
-                            tag="outline",
-                            source_color=shape.color,
-                            brightness=shape.brightness,
-                        )
-                    )
-
-                    if _max_dimension(per_poly) < min_fill_width:
-                        interior_geom = None
-            else:
                 loops = _generate_perimeter_loops(
                     polygon,
                     perimeter_width,
-                    max(perimeter_width, _min_dimension(polygon)),
+                    perimeter_target_width,
                     config.sampling.outline_simplify_tolerance,
-                )
-                _notify(
-                    progress_update,
-                    f"Generating perimeters ({index}/{total_shapes})…",
                 )
                 toolpaths.extend(
                     toolpaths_from_polylines(
@@ -261,7 +258,16 @@ def _build_toolpaths(
                         source_color=shape.color,
                         brightness=shape.brightness,
                     )
-                    )
+                )
+
+                # Keep infill touching the innermost perimeter by only offsetting
+                # inside by (count - 1) perimeter widths.
+                interior_offset = perimeter_width * max(perimeter_count - 1, 0)
+                interior_candidate = _clean_geometry(polygon.buffer(-interior_offset))
+                if interior_candidate.is_empty:
+                    interior_geom = None
+                else:
+                    interior_geom = interior_candidate
 
             if interior_geom and not interior_geom.is_empty:
                 _notify(
@@ -271,17 +277,20 @@ def _build_toolpaths(
                 interior_geom = _clean_geometry(interior_geom)
                 for infill_poly in _geometry_to_polygons(interior_geom):
                     infill_poly = _clean_geometry(infill_poly)
-                    if min_fill_width > 0 and _max_dimension(infill_poly) < min_fill_width:
-                        continue
-                    polylines = generate_rectilinear_infill(infill_poly, density, config.infill)
-                    toolpaths.extend(
-                        toolpaths_from_polylines(
-                            polylines,
-                            tag="infill",
-                            source_color=shape.color,
-                            brightness=shape.brightness,
+                    for fill_region in _select_infill_regions(
+                        infill_poly,
+                        min_fill_width=min_fill_width,
+                        min_fill_mode=min_fill_mode,
+                    ):
+                        polylines = generate_rectilinear_infill(fill_region, density, config.infill)
+                        toolpaths.extend(
+                            toolpaths_from_polylines(
+                                polylines,
+                                tag="infill",
+                                source_color=shape.color,
+                                brightness=shape.brightness,
+                            )
                         )
-                    )
     return toolpaths
 
 

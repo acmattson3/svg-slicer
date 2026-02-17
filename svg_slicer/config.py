@@ -80,8 +80,9 @@ class RenderingConfig:
 @dataclass
 class PerimeterConfig:
     thickness: float
-    density: float
+    count: int
     min_fill_width: float
+    min_fill_mode: str = "min"
 
 
 @dataclass
@@ -242,10 +243,21 @@ def load_config(path: str | pathlib.Path, profile: str | None = None) -> SlicerC
     )
 
     perimeter_raw = raw.get("perimeter", {})
+    perimeter_count_raw = perimeter_raw.get("count", perimeter_raw.get("density", 1))
+    try:
+        perimeter_count = int(round(float(perimeter_count_raw)))
+    except (TypeError, ValueError):
+        raise ConfigError("'perimeter.count' must be a numeric value.") from None
+    perimeter_count = max(1, perimeter_count)
+    perimeter_mode_raw = perimeter_raw.get("min_fill_mode", "min")
+    perimeter_mode = str(perimeter_mode_raw).strip().lower()
+    if perimeter_mode not in {"min", "max"}:
+        raise ConfigError("'perimeter.min_fill_mode' must be either 'min' or 'max'.")
     perimeter = PerimeterConfig(
         thickness=float(perimeter_raw.get("thickness_mm", 0.45)),
-        density=float(perimeter_raw.get("density", 1.0)),
+        count=perimeter_count,
         min_fill_width=float(perimeter_raw.get("min_fill_width_mm", 0.8)),
+        min_fill_mode=perimeter_mode,
     )
 
     rendering_raw = raw.get("rendering", {})

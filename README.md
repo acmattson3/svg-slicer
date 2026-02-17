@@ -6,7 +6,7 @@ Under the hood the slicer resolves fills, strokes, and text into geometry, appli
 
 ## Features
 
-- PySide6 GUI lets you drag-and-drop multiple SVGs, rescale and rotate each model with live footprint readouts, position artwork directly on the virtual build plate, duplicate selected models (`Ctrl+D`), undo placement edits (`Ctrl+Z`), save/load full arrangements as `.plot` layout files, and export the queued job to a single G-code file.
+- PySide6 GUI lets you drag-and-drop multiple SVGs, rescale and rotate each model with live/editable footprint readouts, position artwork directly on the virtual build plate, zoom with the mouse wheel and pan with right-drag, duplicate selected models (`Ctrl+D`), undo placement edits (`Ctrl+Z`), save/load full arrangements as `.plot` layout files, and export the queued job to a single G-code file.
 - Built-in configuration editor loads/saves YAML printer profiles including bed limits, feedrates, start/end sequences, pause scripts, and colour palettes.
 - Palette-aware colour workflow maps SVG fills/strokes to the nearest configured colour, batches passes in least-used order, and inserts your pause script (default `M600`) while logging the planned colour order.
 - Black-and-white mode converts fills to grayscale, driving density-scaled cross-hatch infill with perimeter glides to minimise pen lifts while thick strokes receive dedicated outline passes.
@@ -48,7 +48,7 @@ Edit `config.yaml` to match your machine. Printer settings can be grouped into n
 - `printers.<profile>.available_colors`: ordered list of `#RRGGBB` strings representing pens on hand; required when colour mode is enabled.
 - `printers.<profile>.pause_gcode`: commands executed between colour batches (defaults to `["M600"]` if omitted).
 - `infill.base_line_spacing_mm`, `min_density`, `max_density`, `angles_degrees`: tune cross-hatch spacing, density range, and rotation angles.
-- `perimeter.thickness_mm`, `density`, `min_fill_width_mm`: outline width, duplication factor, and the minimum feature size that still receives hatch infill.
+- `perimeter.thickness_mm`, `count`, `min_fill_width_mm`, `min_fill_mode`: outline line width, number of perimeter loops, the minimum feature-size threshold for infill, and how that threshold is measured (`min` for minimum local thickness, default; `max` for any dimension).
 - `sampling.segment_length_tolerance_mm`, `outline_simplify_tolerance_mm`, `curve_detail_scale`: geometry sampling controls that balance fidelity against speed.
 - `rendering.preview_line_width_mm`: stroke width used in Matplotlib previews.
 
@@ -64,11 +64,13 @@ python3 -m svg_slicer --config config.yaml
 
 - Provide `--printer-profile <name>` to open with a specific profile.
 - Drop SVG files onto the build plate or use **Add SVGs…**; each file is auto-fit to the printable area once on import.
-- Select a model to adjust scale (percent), rotation (degrees), and XY position; the footprint readout shows the post-scale bounds and warns if you exceed the printable window.
+- Select a model to adjust scale (percent), rotation (degrees), and XY position; footprint width/height (mm) can be edited directly and translated into scale.
+- Use the mouse wheel over the build plate to zoom and right-click drag to pan.
 - Use **Edit → Undo** (`Ctrl+Z`) to revert arrangement edits (move, scale, rotation, import, duplicate, delete, clear, and layout load).
 - Use **Edit → Duplicate Selected** (`Ctrl+D`) to clone one or more selected SVGs while preserving each model's current scale and rotation and offsetting position slightly for quick re-layout.
 - Use **File → Save Layout As…** / **File → Load Layout…** (`.plot`) to persist and restore queued SVG placement, scale, and rotation between sessions.
 - Set the destination path for the exported G-code and press **Slice** to generate toolpaths. The status bar and log window report line count, colour order (if applicable), and the estimated plot time.
+- Loading layouts and applying settings show modal progress dialogs when model reload/reconfiguration work is in progress.
 - Configure printer profiles, palettes, infill, and sampling values on the **Settings** tab, then apply or save back to YAML.
 - On Wayland-based WSL environments the app automatically switches Qt to the `xcb` backend to avoid protocol issues.
 
