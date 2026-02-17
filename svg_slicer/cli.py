@@ -109,6 +109,22 @@ def _min_dimension(polygon: Polygon) -> float:
     return min(edges)
 
 
+def _max_dimension(polygon: Polygon) -> float:
+    if polygon.is_empty:
+        return 0.0
+    rect = polygon.minimum_rotated_rectangle
+    coords = list(rect.exterior.coords)
+    if len(coords) < 2:
+        return 0.0
+    edges = [
+        LineString([coords[i], coords[i + 1]]).length
+        for i in range(len(coords) - 1)
+    ]
+    if not edges:
+        return 0.0
+    return max(edges)
+
+
 def _generate_perimeter_loops(
     polygon: Polygon,
     step: float,
@@ -225,7 +241,7 @@ def _build_toolpaths(
                         )
                     )
 
-                    if min_width < min_fill_width:
+                    if _max_dimension(per_poly) < min_fill_width:
                         interior_geom = None
             else:
                 loops = _generate_perimeter_loops(
@@ -255,7 +271,7 @@ def _build_toolpaths(
                 interior_geom = _clean_geometry(interior_geom)
                 for infill_poly in _geometry_to_polygons(interior_geom):
                     infill_poly = _clean_geometry(infill_poly)
-                    if min_fill_width > 0 and _min_dimension(infill_poly) < min_fill_width:
+                    if min_fill_width > 0 and _max_dimension(infill_poly) < min_fill_width:
                         continue
                     polylines = generate_rectilinear_infill(infill_poly, density, config.infill)
                     toolpaths.extend(

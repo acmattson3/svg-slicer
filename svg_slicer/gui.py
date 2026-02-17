@@ -13,7 +13,7 @@ from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
 import yaml
 
 try:
-    from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QTimer
+    from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal, QTimer
     from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPainterPath, QPen
     from PySide6.QtWidgets import (
         QApplication,
@@ -35,6 +35,7 @@ try:
         QPlainTextEdit,
         QProgressDialog,
         QScrollArea,
+        QSplitter,
         QSizePolicy,
         QTabWidget,
         QVBoxLayout,
@@ -517,6 +518,11 @@ class BuildPlateView(QGraphicsView):
         self._model_items: List[ModelGraphicsItem] = []
         self._suppress_selection_signal = False
         self._refit_pending = False
+        self._manual_navigation = False
+        self._zoom_min_factor = 0.3
+        self._zoom_max_factor = 40.0
+        self._panning = False
+        self._pan_last_pos: Optional[QPoint] = None
 
         self._scene.selectionChanged.connect(self._handle_selection_changed)
 
@@ -563,7 +569,8 @@ class BuildPlateView(QGraphicsView):
         self._info_item.setZValue(5)
         self._update_info_position()
         self._update_info_visibility()
-        self._schedule_refit()
+        self._manual_navigation = False
+        self._schedule_refit(force=True)
 
     def reset_models(self, models: Sequence[LoadedModel]) -> None:
         self.clear_models()
@@ -673,19 +680,75 @@ class BuildPlateView(QGraphicsView):
         super().resizeEvent(event)
         self._refit()
 
-    def _schedule_refit(self) -> None:
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        if not self._bed_item:
+            super().wheelEvent(event)
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
+
+        zoom_factor = 1.15 if delta > 0 else (1.0 / 1.15)
+        current_scale = self.transform().m11()
+        target_scale = current_scale * zoom_factor
+        if target_scale < self._zoom_min_factor:
+            zoom_factor = self._zoom_min_factor / max(current_scale, 1e-9)
+        elif target_scale > self._zoom_max_factor:
+            zoom_factor = self._zoom_max_factor / max(current_scale, 1e-9)
+
+        if not math.isclose(zoom_factor, 1.0, abs_tol=1e-6):
+            self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+            self.scale(zoom_factor, zoom_factor)
+            self.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
+            self._manual_navigation = True
+        event.accept()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.RightButton:
+            self._panning = True
+            self._pan_last_pos = event.position().toPoint()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self._panning and self._pan_last_pos is not None:
+            pos = event.position().toPoint()
+            delta = pos - self._pan_last_pos
+            self._pan_last_pos = pos
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            self._manual_navigation = True
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.RightButton and self._panning:
+            self._panning = False
+            self._pan_last_pos = None
+            self.unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _schedule_refit(self, *, force: bool = False) -> None:
         if self._refit_pending:
             return
         self._refit_pending = True
 
         def trigger() -> None:
             self._refit_pending = False
-            self._refit()
+            self._refit(force=force)
 
         QTimer.singleShot(0, trigger)
 
-    def _refit(self) -> None:
+    def _refit(self, *, force: bool = False) -> None:
         if not self._bed_item:
+            return
+        if self._manual_navigation and not force:
             return
         rect = self._bed_item.rect()
         if rect.width() <= 0 or rect.height() <= 0:
@@ -799,10 +862,10 @@ class PrepareTab(QWidget):
 
         scale_row = QHBoxLayout()
         self.scale_spin = QDoubleSpinBox()
-        self.scale_spin.setRange(1.0, 1000.0)
-        self.scale_spin.setDecimals(1)
+        self.scale_spin.setRange(0.01, 1000.0)
+        self.scale_spin.setDecimals(2)
         self.scale_spin.setSuffix(" %")
-        self.scale_spin.setSingleStep(5.0)
+        self.scale_spin.setSingleStep(0.1)
         self.scale_spin.setEnabled(False)
         scale_row.addWidget(self.scale_spin)
 
@@ -1434,21 +1497,28 @@ class MainWindow(QMainWindow):
         self._central_widget = QWidget()
         self.setCentralWidget(self._central_widget)
         self._layout = QVBoxLayout(self._central_widget)
+        self._main_splitter = QSplitter(Qt.Vertical)
+        self._layout.addWidget(self._main_splitter)
 
         self.tabs = QTabWidget()
         self.prepare_tab = PrepareTab()
         self.settings_tab = SettingsTab()
         self.tabs.addTab(self.prepare_tab, "Prepare")
         self.tabs.addTab(self.settings_tab, "Settings")
-        self._layout.addWidget(self.tabs, stretch=2)
+        self._main_splitter.addWidget(self.tabs)
 
         self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setPlaceholderText("Log output will appear here.")
         self.log_output.setMaximumBlockCount(5000)
         self.log_output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.log_output.setMinimumHeight(140)
-        self._layout.addWidget(self.log_output, stretch=1)
+        self.log_output.setMinimumHeight(80)
+        self._main_splitter.addWidget(self.log_output)
+        self._main_splitter.setStretchFactor(0, 4)
+        self._main_splitter.setStretchFactor(1, 1)
+        self._main_splitter.setCollapsible(0, False)
+        self._main_splitter.setCollapsible(1, True)
+        self._main_splitter.setSizes([560, 160])
 
         self.statusBar().showMessage("Ready")
 
