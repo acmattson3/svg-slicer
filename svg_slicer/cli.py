@@ -79,6 +79,27 @@ def _geometry_to_polygons(geometry: BaseGeometry) -> List[Polygon]:
     return []
 
 
+def _geometry_to_polylines(geometry: BaseGeometry) -> List[List[tuple[float, float]]]:
+    if geometry.is_empty:
+        return []
+    if isinstance(geometry, LineString):
+        coords = list(geometry.coords)
+        if len(coords) < 2:
+            return []
+        return [[(float(x), float(y)) for x, y in coords]]
+    if isinstance(geometry, MultiLineString):
+        polylines: List[List[tuple[float, float]]] = []
+        for part in geometry.geoms:
+            polylines.extend(_geometry_to_polylines(part))
+        return polylines
+    if isinstance(geometry, GeometryCollection):
+        polylines: List[List[tuple[float, float]]] = []
+        for part in geometry.geoms:
+            polylines.extend(_geometry_to_polylines(part))
+        return polylines
+    return []
+
+
 def _ring_to_polyline(ring: LinearRing, tolerance: float) -> List[tuple[float, float]]:
     coords = list(ring.coords)
     if len(coords) < 2:
@@ -188,6 +209,20 @@ def _generate_perimeter_loops(
 def _build_stroke_toolpaths(shape: ShapeGeometry, config: SlicerConfig) -> List[Toolpath]:
     if shape.stroke_width is None:
         return []
+    centerlines = _geometry_to_polylines(shape.geometry)
+    if not centerlines and config.sampling.plot_mode == "auto" and shape.centerline_geometry is not None:
+        threshold = config.sampling.plot_stroke_width_threshold
+        if threshold <= 0:
+            threshold = config.perimeter.thickness
+        if shape.stroke_width <= threshold + 1e-9:
+            centerlines = _geometry_to_polylines(shape.centerline_geometry)
+    if centerlines:
+        return toolpaths_from_polylines(
+            centerlines,
+            tag="stroke",
+            source_color=shape.color,
+            brightness=shape.brightness,
+        )
     loops = _generate_perimeter_loops(
         polygon=shape.geometry,
         step=config.perimeter.thickness,

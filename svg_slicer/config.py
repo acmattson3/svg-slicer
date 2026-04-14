@@ -45,6 +45,10 @@ class PrinterConfig:
     color_mode: bool = False
     available_colors: List[str] = field(default_factory=list)
     pause_gcode: List[str] = field(default_factory=lambda: ["M600"])
+    draw_command: str | None = None
+    lift_command: str | None = None
+    draw_move_command: str | None = None
+    travel_move_command: str | None = None
 
     @property
     def printable_width(self) -> float:
@@ -70,6 +74,8 @@ class SamplingConfig:
     curve_detail_scale: float = 1.0
     raster_sample_spacing: float = 2.0
     raster_max_cells: int = 4000
+    plot_mode: str = "trace"
+    plot_stroke_width_threshold: float = 0.0
 
 
 @dataclass
@@ -120,6 +126,44 @@ def _require(mapping: Dict[str, Any], key: str) -> Any:
     return mapping[key]
 
 
+def _optional_command(printer_raw: Dict[str, Any], key: str) -> str | None:
+    value = printer_raw.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(f"'{key}' must be a G-code command string.")
+    command = value.strip()
+    return command or None
+
+
+def _normalize_plot_mode(value: Any) -> str:
+    if isinstance(value, bool):
+        return "centerline" if value else "trace"
+    if value is None:
+        return "trace"
+    mode = str(value).strip().lower()
+    aliases = {
+        "": "trace",
+        "false": "trace",
+        "off": "trace",
+        "no": "trace",
+        "0": "trace",
+        "outline": "trace",
+        "trace": "trace",
+        "true": "centerline",
+        "on": "centerline",
+        "yes": "centerline",
+        "1": "centerline",
+        "plot": "centerline",
+        "centerline": "centerline",
+        "centreline": "centerline",
+        "auto": "auto",
+    }
+    if mode not in aliases:
+        raise ConfigError("'plot_mode' must be one of: false, true, trace, centerline, auto.")
+    return aliases[mode]
+
+
 def _parse_printer_config(printer_raw: Dict[str, Any], fallback_name: str | None = None) -> PrinterConfig:
     bed = _require(printer_raw, "bed_size_mm")
     offsets = _require(printer_raw, "origin_offsets_mm")
@@ -167,6 +211,10 @@ def _parse_printer_config(printer_raw: Dict[str, Any], fallback_name: str | None
         feedrates=feedrates,
         start_gcode=list(printer_raw.get("start_gcode", [])),
         end_gcode=list(printer_raw.get("end_gcode", [])),
+        draw_command=_optional_command(printer_raw, "draw_command"),
+        lift_command=_optional_command(printer_raw, "lift_command"),
+        draw_move_command=_optional_command(printer_raw, "draw_move_command"),
+        travel_move_command=_optional_command(printer_raw, "travel_move_command"),
         color_mode=color_mode,
         available_colors=available_colors,
         pause_gcode=pause_gcode,
@@ -229,6 +277,11 @@ def load_config(path: str | pathlib.Path, profile: str | None = None) -> SlicerC
     )
 
     sampling_raw = _require(raw, "sampling")
+    plot_mode_raw = sampling_raw.get("plot_mode", printer_raw.get("plot_mode", False))
+    plot_threshold_raw = sampling_raw.get(
+        "plot_stroke_width_threshold_mm",
+        printer_raw.get("plot_stroke_width_threshold_mm", 0.0),
+    )
     sampling = SamplingConfig(
         segment_tolerance=float(_require(sampling_raw, "segment_length_tolerance_mm")),
         outline_simplify_tolerance=float(
@@ -240,6 +293,8 @@ def load_config(path: str | pathlib.Path, profile: str | None = None) -> SlicerC
         curve_detail_scale=float(sampling_raw.get("curve_detail_scale", 1.0)),
         raster_sample_spacing=float(sampling_raw.get("raster_sample_spacing_mm", 2.0)),
         raster_max_cells=int(sampling_raw.get("raster_max_cells", 4000)),
+        plot_mode=_normalize_plot_mode(plot_mode_raw),
+        plot_stroke_width_threshold=float(plot_threshold_raw),
     )
 
     perimeter_raw = raw.get("perimeter", {})
@@ -259,6 +314,8 @@ def load_config(path: str | pathlib.Path, profile: str | None = None) -> SlicerC
         min_fill_width=float(perimeter_raw.get("min_fill_width_mm", 0.8)),
         min_fill_mode=perimeter_mode,
     )
+    if sampling.plot_mode == "auto" and sampling.plot_stroke_width_threshold <= 0:
+        sampling.plot_stroke_width_threshold = perimeter.thickness
 
     rendering_raw = raw.get("rendering", {})
     rendering = RenderingConfig(

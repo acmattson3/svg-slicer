@@ -164,15 +164,22 @@ class LoadedModel:
         translate_y = offset_y + (self.position[1] if include_position else 0.0)
 
         transformed: List[ShapeGeometry] = []
-        for geom, brightness, stroke_width, color in staged or []:
+        for geom, brightness, stroke_width, color, centerline_geometry in staged or []:
             if translate_x != 0.0 or translate_y != 0.0:
                 geom = shapely_translate(geom, xoff=translate_x, yoff=translate_y)
+                if centerline_geometry is not None:
+                    centerline_geometry = shapely_translate(
+                        centerline_geometry,
+                        xoff=translate_x,
+                        yoff=translate_y,
+                    )
             transformed.append(
                 ShapeGeometry(
                     geometry=geom,
                     brightness=brightness,
                     stroke_width=stroke_width,
                     color=color,
+                    centerline_geometry=centerline_geometry,
                 )
             )
 
@@ -190,10 +197,10 @@ class LoadedModel:
         rotation: float,
         capture_shapes: bool,
     ) -> Tuple[
-        Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]]]]],
+        Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]], Optional[Any]]]],
         Tuple[float, float, float, float],
     ]:
-        staged: Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]]]]] = (
+        staged: Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]], Optional[Any]]]] = (
             [] if capture_shapes else None
         )
 
@@ -210,8 +217,23 @@ class LoadedModel:
 
         for shape in self.normalized_shapes:
             geom = shapely_scale(shape.geometry, xfact=scale, yfact=scale, origin=(0, 0))
+            centerline_geometry = shape.centerline_geometry
+            if centerline_geometry is not None:
+                centerline_geometry = shapely_scale(
+                    centerline_geometry,
+                    xfact=scale,
+                    yfact=scale,
+                    origin=(0, 0),
+                )
             if rotate_needed:
                 geom = shapely_rotate(geom, rotation, origin=origin, use_radians=False)
+                if centerline_geometry is not None:
+                    centerline_geometry = shapely_rotate(
+                        centerline_geometry,
+                        rotation,
+                        origin=origin,
+                        use_radians=False,
+                    )
             if not geom.is_empty:
                 bounds = geom.bounds
                 min_x = min(min_x, bounds[0])
@@ -225,6 +247,7 @@ class LoadedModel:
                         shape.brightness,
                         None if shape.stroke_width is None else shape.stroke_width * scale,
                         shape.color,
+                        centerline_geometry,
                     )
                 )
 
@@ -1233,6 +1256,24 @@ class SettingsTab(QWidget):
         printer_form.addRow("Z travel (mm)", self.z_travel_spin)
         printer_form.addRow("Z lift (mm)", self.z_lift_spin)
 
+        self.draw_command_edit = QLineEdit()
+        self.draw_command_edit.setPlaceholderText("Optional, e.g. M03")
+        self.lift_command_edit = QLineEdit()
+        self.lift_command_edit.setPlaceholderText("Optional, e.g. M05")
+        self._set_wide(self.draw_command_edit)
+        self._set_wide(self.lift_command_edit)
+        printer_form.addRow("Draw command", self.draw_command_edit)
+        printer_form.addRow("Lift command", self.lift_command_edit)
+
+        self.draw_move_command_edit = QLineEdit()
+        self.draw_move_command_edit.setPlaceholderText("Optional, default G1")
+        self.travel_move_command_edit = QLineEdit()
+        self.travel_move_command_edit.setPlaceholderText("Optional, default G0")
+        self._set_wide(self.draw_move_command_edit)
+        self._set_wide(self.travel_move_command_edit)
+        printer_form.addRow("Draw move command", self.draw_move_command_edit)
+        printer_form.addRow("Travel move command", self.travel_move_command_edit)
+
         self.feedrate_draw_spin = self._make_spin(0.1, 2000.0, 0.1)
         self.feedrate_travel_spin = self._make_spin(0.1, 2000.0, 0.1)
         self.feedrate_z_spin = self._make_spin(0.1, 2000.0, 0.1)
@@ -1322,13 +1363,19 @@ class SettingsTab(QWidget):
         self.segment_tolerance_spin = self._make_spin(0.001, 10.0, 0.01, decimals=4)
         self.outline_tolerance_spin = self._make_spin(0.001, 10.0, 0.01, decimals=4)
         self.curve_detail_scale_spin = self._make_spin(0.1, 20.0, 0.1, decimals=2)
+        self.plot_mode_combo = QComboBox()
+        self.plot_mode_combo.addItem("Trace stroke outlines", "trace")
+        self.plot_mode_combo.addItem("Centerline all strokes", "centerline")
+        self.plot_mode_combo.addItem("Auto by pen width", "auto")
         self._set_wide(self.segment_tolerance_spin)
         self._set_wide(self.outline_tolerance_spin)
         self._set_wide(self.curve_detail_scale_spin)
+        self._set_wide(self.plot_mode_combo)
 
         sampling_form.addRow("Segment tolerance (mm)", self.segment_tolerance_spin)
         sampling_form.addRow("Outline simplify (mm)", self.outline_tolerance_spin)
         sampling_form.addRow("Curve detail scale", self.curve_detail_scale_spin)
+        sampling_form.addRow("Plot mode", self.plot_mode_combo)
 
         layout.addWidget(sampling_group)
 
@@ -1403,6 +1450,10 @@ class SettingsTab(QWidget):
         self.z_draw_spin.setValue(printer.z_draw)
         self.z_travel_spin.setValue(printer.z_travel)
         self.z_lift_spin.setValue(printer.z_lift)
+        self.draw_command_edit.setText(printer.draw_command or "")
+        self.lift_command_edit.setText(printer.lift_command or "")
+        self.draw_move_command_edit.setText(printer.draw_move_command or "")
+        self.travel_move_command_edit.setText(printer.travel_move_command or "")
         self.feedrate_draw_spin.setValue(printer.feedrates.draw_mm_s)
         self.feedrate_travel_spin.setValue(printer.feedrates.travel_mm_s)
         self.feedrate_z_spin.setValue(printer.feedrates.z_mm_s)
@@ -1429,6 +1480,8 @@ class SettingsTab(QWidget):
         self.segment_tolerance_spin.setValue(sampling.segment_tolerance)
         self.outline_tolerance_spin.setValue(sampling.outline_simplify_tolerance)
         self.curve_detail_scale_spin.setValue(sampling.curve_detail_scale)
+        mode_index = self.plot_mode_combo.findData(sampling.plot_mode)
+        self.plot_mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
 
         rendering = config.rendering
         self.preview_line_width_spin.setValue(rendering.line_width)
@@ -1469,6 +1522,10 @@ class SettingsTab(QWidget):
             color_mode=color_mode,
             available_colors=palette,
             pause_gcode=pause_lines,
+            draw_command=self.draw_command_edit.text().strip() or None,
+            lift_command=self.lift_command_edit.text().strip() or None,
+            draw_move_command=self.draw_move_command_edit.text().strip() or None,
+            travel_move_command=self.travel_move_command_edit.text().strip() or None,
         )
 
         try:
@@ -1494,6 +1551,8 @@ class SettingsTab(QWidget):
             segment_tolerance=self.segment_tolerance_spin.value(),
             outline_simplify_tolerance=self.outline_tolerance_spin.value(),
             curve_detail_scale=self.curve_detail_scale_spin.value(),
+            plot_mode=str(self.plot_mode_combo.currentData() or "trace"),
+            plot_stroke_width_threshold=self.perimeter_thickness_spin.value(),
         )
 
         rendering = RenderingConfig(
@@ -1752,6 +1811,7 @@ class MainWindow(QMainWindow):
                 brightness=shape.brightness,
                 stroke_width=shape.stroke_width,
                 color=shape.color,
+                centerline_geometry=shape.centerline_geometry,
             )
             for shape in shapes
         ]
@@ -1906,6 +1966,7 @@ class MainWindow(QMainWindow):
                     brightness=shape.brightness,
                     stroke_width=shape.stroke_width,
                     color=shape.color,
+                    centerline_geometry=shape.centerline_geometry,
                 )
                 for shape in shapes
             ]
@@ -1921,14 +1982,22 @@ class MainWindow(QMainWindow):
         normalized_shapes: List[ShapeGeometry] = []
         for shape in shapes:
             geom = shape.geometry
+            centerline_geometry = shape.centerline_geometry
             if not geom.is_empty:
                 geom = shapely_translate(geom, xoff=-min_x, yoff=-min_y)
+            if centerline_geometry is not None and not centerline_geometry.is_empty:
+                centerline_geometry = shapely_translate(
+                    centerline_geometry,
+                    xoff=-min_x,
+                    yoff=-min_y,
+                )
             normalized_shapes.append(
                 ShapeGeometry(
                     geometry=geom,
                     brightness=shape.brightness,
                     stroke_width=shape.stroke_width,
                     color=shape.color,
+                    centerline_geometry=centerline_geometry,
                 )
             )
         return normalized_shapes, width, height
@@ -2661,6 +2730,14 @@ class MainWindow(QMainWindow):
             "available_colors": list(config.printer.available_colors),
             "pause_gcode": list(config.printer.pause_gcode),
         }
+        if config.printer.draw_command:
+            printer["draw_command"] = config.printer.draw_command
+        if config.printer.lift_command:
+            printer["lift_command"] = config.printer.lift_command
+        if config.printer.draw_move_command:
+            printer["draw_move_command"] = config.printer.draw_move_command
+        if config.printer.travel_move_command:
+            printer["travel_move_command"] = config.printer.travel_move_command
         if config.printer.start_gcode:
             printer["start_gcode"] = list(config.printer.start_gcode)
         if config.printer.end_gcode:
@@ -2684,6 +2761,7 @@ class MainWindow(QMainWindow):
                 "segment_length_tolerance_mm": config.sampling.segment_tolerance,
                 "outline_simplify_tolerance_mm": config.sampling.outline_simplify_tolerance,
                 "curve_detail_scale": config.sampling.curve_detail_scale,
+                "plot_mode": config.sampling.plot_mode,
             },
             "rendering": {
                 "preview_line_width_mm": config.rendering.line_width,

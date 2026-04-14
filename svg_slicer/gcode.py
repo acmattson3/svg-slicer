@@ -32,6 +32,7 @@ class GcodeGenerator:
         self._gcode: List[str] = []
         self._position: Point | None = None
         self._z_height: float = printer.z_travel
+        self._pen_is_down = False
         self._feedrate: float | None = None
         self._elapsed_time: float = 0.0
 
@@ -55,7 +56,11 @@ class GcodeGenerator:
         if self._position is not None:
             distance = _distance(self._position, point)
             self._accumulate_motion_time(distance, feedrate)
-        self._emit_with_feed("G0", self._format_xy(point), feedrate)
+        self._emit_with_feed(
+            self.printer.travel_move_command or "G0",
+            self._format_xy(point),
+            feedrate,
+        )
         self._position = point
 
     def _linear_move(self, point: Point, feedrate: float) -> None:
@@ -64,7 +69,11 @@ class GcodeGenerator:
         if self._position is not None:
             distance = _distance(self._position, point)
             self._accumulate_motion_time(distance, feedrate)
-        self._emit_with_feed("G1", self._format_xy(point), feedrate)
+        self._emit_with_feed(
+            self.printer.draw_move_command or "G1",
+            self._format_xy(point),
+            feedrate,
+        )
         self._position = point
 
     def _set_z(self, z: float, feedrate: float) -> None:
@@ -78,6 +87,18 @@ class GcodeGenerator:
             self._emit(f"G1 Z{z:.3f}")
         self._z_height = z
         self._accumulate_motion_time(distance, feedrate)
+
+    def _set_pen_state(self, drawing: bool, z: float, feedrate: float) -> None:
+        command = self.printer.draw_command if drawing else self.printer.lift_command
+        if command:
+            if self._pen_is_down != drawing:
+                self._emit(command)
+            self._pen_is_down = drawing
+            self._z_height = z
+            return
+
+        self._set_z(z, feedrate)
+        self._pen_is_down = drawing
 
     def _accumulate_motion_time(self, distance: float, feedrate: float) -> None:
         if distance <= 0 or feedrate <= 0:
@@ -112,12 +133,12 @@ class GcodeGenerator:
         travel_height = self.printer.z_travel
 
         start = points[0]
-        self._set_z(travel_height, z_feed)
+        self._set_pen_state(False, travel_height, z_feed)
         self._rapid_move(start, travel_feed)
-        self._set_z(draw_height, z_feed)
+        self._set_pen_state(True, draw_height, z_feed)
         for point in points[1:]:
             self._linear_move(point, draw_feed)
-        self._set_z(travel_height, z_feed)
+        self._set_pen_state(False, travel_height, z_feed)
 
     def draw_toolpaths(self, toolpaths: Iterable[Toolpath], feedrates: Feedrates) -> None:
         for toolpath in toolpaths:

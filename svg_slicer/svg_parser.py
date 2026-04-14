@@ -9,10 +9,10 @@ from PIL import Image as PILImage
 from shapely.affinity import affine_transform as shapely_affine_transform
 from shapely.affinity import scale as shapely_scale
 from shapely.affinity import translate as shapely_translate
-from shapely.geometry import GeometryCollection, LineString, Polygon
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
-from svgelements import Arc, ClipPath, Color, Image, Move, Path, SVG, Text
+from svgelements import Arc, ClipPath, Color, Image, Line, Move, Path, SVG, Text
 from matplotlib.font_manager import FontProperties
 from matplotlib.textpath import TextPath
 
@@ -28,6 +28,7 @@ class ShapeGeometry:
     brightness: float
     stroke_width: float | None = None
     color: tuple[int, int, int] | None = None
+    centerline_geometry: BaseGeometry | None = None
 
 
 def _shoelace_area(points: Sequence[Tuple[float, float]]) -> float:
@@ -388,6 +389,14 @@ def _path_to_lines(path: Path, tolerance: float, detail_scale: float) -> List[Li
                 lines.append(current)
             current = [(segment.end.real, segment.end.imag)]
             continue
+        if isinstance(segment, Line):
+            if not current:
+                start_point = segment.start
+                current.append((start_point.real, start_point.imag))
+            end_point = (segment.end.real, segment.end.imag)
+            if current[-1] != end_point:
+                current.append(end_point)
+            continue
         length_error_base = tolerance / 10.0 if tolerance else 0.01
         length = segment.length(error=length_error_base / detail_multiplier)
         if length == 0:
@@ -439,6 +448,30 @@ def _geometry_to_polygons(geometry: BaseGeometry) -> List[Polygon]:
     return []
 
 
+def _geometry_to_lines(geometry: BaseGeometry) -> List[LineString]:
+    if geometry.is_empty:
+        return []
+    if isinstance(geometry, LineString):
+        return [geometry] if geometry.length > 0 else []
+    if isinstance(geometry, MultiLineString):
+        return [line for line in geometry.geoms if line.length > 0]
+    if isinstance(geometry, GeometryCollection):
+        lines: List[LineString] = []
+        for part in geometry.geoms:
+            lines.extend(_geometry_to_lines(part))
+        return lines
+    return []
+
+
+def _lines_to_geometry(lines: List[LineString]) -> BaseGeometry | None:
+    usable = [line for line in lines if not line.is_empty and line.length > 0]
+    if not usable:
+        return None
+    if len(usable) == 1:
+        return usable[0]
+    return MultiLineString([list(line.coords) for line in usable])
+
+
 def _resolve_visibility(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]:
     if not shapes:
         return []
@@ -452,6 +485,22 @@ def _resolve_visibility(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]:
             continue
         if not occlusion.is_empty:
             geometry = geometry.difference(occlusion)
+
+        line_parts = _geometry_to_lines(geometry)
+        polygon_parts = _geometry_to_polygons(geometry)
+        if line_parts and not polygon_parts:
+            for line in line_parts:
+                visible_reversed.append(
+                    ShapeGeometry(
+                        geometry=line,
+                        brightness=shape.brightness,
+                        stroke_width=shape.stroke_width,
+                        color=shape.color,
+                        centerline_geometry=shape.centerline_geometry,
+                    )
+                )
+            continue
+
         geometry = geometry.buffer(0)
         polys_for_union: List[BaseGeometry] = []
         for polygon in _geometry_to_polygons(geometry):
@@ -463,6 +512,13 @@ def _resolve_visibility(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]:
                     brightness=shape.brightness,
                     stroke_width=shape.stroke_width,
                     color=shape.color,
+                    centerline_geometry=(
+                        _lines_to_geometry(
+                            _geometry_to_lines(shape.centerline_geometry.intersection(polygon))
+                        )
+                        if shape.centerline_geometry is not None
+                        else None
+                    ),
                 )
             )
             polys_for_union.append(polygon)
@@ -484,6 +540,16 @@ def _apply_clip(polygons: List[Polygon], clip: BaseGeometry | None) -> List[Poly
             if piece.is_empty or piece.area <= 0:
                 continue
             clipped.append(piece)
+    return clipped
+
+
+def _apply_clip_to_lines(lines: List[LineString], clip: BaseGeometry | None) -> List[LineString]:
+    if clip is None:
+        return lines
+    clipped: List[LineString] = []
+    for line in lines:
+        inter = line.intersection(clip)
+        clipped.extend(_geometry_to_lines(inter))
     return clipped
 
 
@@ -732,6 +798,7 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
             except (TypeError, ValueError):
                 stroke_w = float(getattr(stroke_width, "value", 0))
             if stroke_w > 0:
+                stroke_lines: List[LineString] = []
                 if is_text:
                     if fill_sources:
                         union_source = unary_union([poly.buffer(0) for poly in fill_sources if not poly.is_empty])
@@ -743,6 +810,32 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
                                 stroke_polygons = _geometry_to_polygons(stroke_geom)
                 else:
                     if path is not None:
+                        if sampling.plot_mode in {"centerline", "auto"}:
+                            stroke_lines = [
+                                LineString(points)
+                                for points in _path_to_lines(
+                                    path,
+                                    tolerance,
+                                    sampling.curve_detail_scale,
+                                )
+                                if len(points) >= 2
+                            ]
+                            stroke_lines = _apply_clip_to_lines(stroke_lines, clip_geom)
+                        if sampling.plot_mode == "centerline":
+                            brightness = _color_to_brightness(stroke_color)
+                            rgb = _color_to_rgb(stroke_color)
+                            for line in stroke_lines:
+                                if line.is_empty or line.length <= 0:
+                                    continue
+                                shapes.append(
+                                    ShapeGeometry(
+                                        geometry=line,
+                                        brightness=brightness,
+                                        stroke_width=stroke_w,
+                                        color=rgb,
+                                    )
+                                )
+                            continue
                         stroke_polygons = _path_to_stroke_polygons(
                             path, stroke_w, tolerance, sampling.curve_detail_scale
                         )
@@ -751,16 +844,29 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
                     if stroke_polygons:
                         brightness = _color_to_brightness(stroke_color)
                         rgb = _color_to_rgb(stroke_color)
+                        centerline_geometry = (
+                            _lines_to_geometry(stroke_lines)
+                            if sampling.plot_mode == "auto"
+                            else None
+                        )
                         for polygon in stroke_polygons:
                             polygon = polygon.buffer(0)
                             if polygon.is_empty or polygon.area <= 0:
                                 continue
+                            clipped_centerline = (
+                                _lines_to_geometry(
+                                    _geometry_to_lines(centerline_geometry.intersection(polygon))
+                                )
+                                if centerline_geometry is not None
+                                else None
+                            )
                             shapes.append(
                                 ShapeGeometry(
                                     geometry=polygon,
                                     brightness=brightness,
                                     stroke_width=stroke_w,
                                     color=rgb,
+                                    centerline_geometry=clipped_centerline,
                                 )
                             )
 
@@ -778,12 +884,19 @@ def fit_shapes_to_bed(shapes: List[ShapeGeometry], printer: PrinterConfig) -> Tu
     minx, miny, maxx, maxy = combined.bounds
     width = maxx - minx
     height = maxy - miny
-    if width == 0 or height == 0:
+    if width == 0 and height == 0:
         raise ValueError("SVG has zero width or height after parsing; cannot scale.")
 
     available_width = printer.printable_width
     available_height = printer.printable_depth
-    scale_factor = min(available_width / width, available_height / height)
+    scale_candidates: List[float] = []
+    if width > 0:
+        scale_candidates.append(available_width / width)
+    if height > 0:
+        scale_candidates.append(available_height / height)
+    if not scale_candidates:
+        raise ValueError("Printer has no printable area; cannot scale SVG.")
+    scale_factor = min(scale_candidates)
 
     # Pre-compute translation and scaling parameters.
     translated_shapes: List[ShapeGeometry] = []
@@ -793,6 +906,26 @@ def fit_shapes_to_bed(shapes: List[ShapeGeometry], printer: PrinterConfig) -> Tu
         geom = shapely_scale(geom, xfact=1.0, yfact=-1.0, origin=(0, 0))
         scaled_height = height * scale_factor
         geom = shapely_translate(geom, xoff=printer.x_min, yoff=printer.y_min + scaled_height)
+        centerline_geometry = shape.centerline_geometry
+        if centerline_geometry is not None:
+            centerline_geometry = shapely_translate(centerline_geometry, xoff=-minx, yoff=-miny)
+            centerline_geometry = shapely_scale(
+                centerline_geometry,
+                xfact=scale_factor,
+                yfact=scale_factor,
+                origin=(0, 0),
+            )
+            centerline_geometry = shapely_scale(
+                centerline_geometry,
+                xfact=1.0,
+                yfact=-1.0,
+                origin=(0, 0),
+            )
+            centerline_geometry = shapely_translate(
+                centerline_geometry,
+                xoff=printer.x_min,
+                yoff=printer.y_min + scaled_height,
+            )
         stroke_width = None if shape.stroke_width is None else shape.stroke_width * scale_factor
         translated_shapes.append(
             ShapeGeometry(
@@ -800,6 +933,7 @@ def fit_shapes_to_bed(shapes: List[ShapeGeometry], printer: PrinterConfig) -> Tu
                 brightness=shape.brightness,
                 stroke_width=stroke_width,
                 color=shape.color,
+                centerline_geometry=centerline_geometry,
             )
         )
 

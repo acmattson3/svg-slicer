@@ -81,6 +81,41 @@ printers:
       - G1 Z39.000 F10500 ; lift pen
       - G1 X0.000 Y350.000 F10500 ; park at rear-left
       - M18 ; disable steppers
+  madsen_pen_plotter:
+    name: Madsen Pen Plotter
+    bed_size_mm:
+      width: 265.0
+      depth: 235.0
+    origin_offsets_mm:
+      x_min: 0.0
+      x_max: 265.0
+      y_min: 0.0
+      y_max: 235.0
+    z_heights_mm:
+      draw: 0.0
+      travel: 0.0
+    z_lift_height_mm: 0.0
+    feedrates_mm_s:
+      draw: 100.0
+      travel: 100.0
+      z: 100.0
+    draw_command: "M03"
+    lift_command: "M05"
+    draw_move_command: "G1"
+    travel_move_command: "G0"
+    plot_mode: centerline
+    color_mode: false
+    available_colors:
+      - "#000000"
+    pause_gcode:
+      - "M05"
+    start_gcode:
+      - G21 ; use millimeters
+      - G90 ; absolute positioning
+      - M05 ; pen up
+    end_gcode:
+      - M05 ; pen up
+      - G0 X0 Y0
 infill:
   base_line_spacing_mm: 1.0
   min_density: 0.0
@@ -92,8 +127,8 @@ perimeter:
   min_fill_width_mm: 0.8
   min_fill_mode: min
 sampling:
-  segment_length_tolerance_mm: 0.4
-  outline_simplify_tolerance_mm: 0.4
-  curve_detail_scale: 3.0
+  segment_length_tolerance_mm: 0.1
+  outline_simplify_tolerance_mm: 0.1
+  curve_detail_scale: 6.0
 rendering:
   preview_line_width_mm: 0.45
