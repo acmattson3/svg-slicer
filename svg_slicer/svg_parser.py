@@ -759,6 +759,9 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
         is_text = isinstance(element, Text)
         path: Path | None = None
         fill_sources: List[Polygon] = []
+        fill_color = getattr(element, "fill", None)
+        fill_alpha = getattr(fill_color, "alpha", 0) if fill_color else 0
+        has_visible_fill = fill_color is not None and fill_alpha not in (None, 0)
 
         if is_text:
             fill_sources = _text_to_polygons(element, tolerance)
@@ -773,11 +776,10 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
             if not path_data:
                 continue
             path = Path(path_data)
-            fill_sources = _path_to_polygons(path, tolerance, sampling.curve_detail_scale)
+            if has_visible_fill:
+                fill_sources = _path_to_polygons(path, tolerance, sampling.curve_detail_scale)
 
-        fill_color = getattr(element, "fill", None)
-        fill_alpha = getattr(fill_color, "alpha", 0) if fill_color else 0
-        if fill_color is not None and fill_alpha not in (None, 0):
+        if has_visible_fill:
             polygons = _apply_clip(fill_sources, clip_geom) if fill_sources else []
             if polygons:
                 brightness = _color_to_brightness(fill_color)
@@ -881,13 +883,23 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
 
 
 def _combined_shape_bounds(shapes: List[ShapeGeometry]) -> Tuple[float, float, float, float, float, float]:
-    combined = shapes[0].geometry
-    for shape in shapes[1:]:
-        combined = combined.union(shape.geometry)
-
-    minx, miny, maxx, maxy = combined.bounds
-    if not all(math.isfinite(value) for value in (minx, miny, maxx, maxy)):
+    bounds = [
+        shape.geometry.bounds
+        for shape in shapes
+        if not shape.geometry.is_empty
+    ]
+    finite_bounds = [
+        bound
+        for bound in bounds
+        if len(bound) == 4 and all(math.isfinite(value) for value in bound)
+    ]
+    if not finite_bounds:
         raise ValueError("SVG bounds are invalid; cannot scale.")
+
+    minx = min(bound[0] for bound in finite_bounds)
+    miny = min(bound[1] for bound in finite_bounds)
+    maxx = max(bound[2] for bound in finite_bounds)
+    maxy = max(bound[3] for bound in finite_bounds)
     width = maxx - minx
     height = maxy - miny
     if width == 0 and height == 0:
