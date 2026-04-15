@@ -109,10 +109,11 @@ python3 -m svg_slicer.cli path/to/art.svg \
 Common flags:
 
 - `--preview` opens an interactive Matplotlib window; `--preview-file` saves the image instead.
+- `--scale auto` fits artwork to the printable area (default). Use `--scale none`, `--scale 1`, or another positive factor such as `--scale 0.5` to choose the SVG scale manually.
 - `--color-mode` or `--bw-mode` override the profile default for a single run.
 - `--log-level` adjusts verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`).
 
-The CLI reports the auto-fit scale factor, planned colour order, and motion-only time estimate in both the console and emitted G-code comments.
+The CLI reports the applied scale factor in the console. Planned colour order and motion-only time estimate are also emitted as G-code comments.
 
 ## Testing
 

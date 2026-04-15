@@ -26,7 +26,7 @@ from .config import SlicerConfig, load_config
 from .gcode import GcodeGenerator, Toolpath, toolpaths_from_polylines
 from .infill import generate_rectilinear_infill
 from .preview import render_toolpaths
-from .svg_parser import ShapeGeometry, fit_shapes_to_bed, parse_svg
+from .svg_parser import ShapeGeometry, fit_shapes_to_bed, parse_svg, place_shapes_on_bed
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +334,7 @@ def generate_toolpaths_for_shapes(
     config: SlicerConfig,
     *,
     fit_to_bed: bool = True,
+    scale_factor: Optional[float] = None,
     progress_update: Optional[ProgressCallback] = None,
 ) -> Tuple[List[Toolpath], float]:
     shape_list = list(shapes)
@@ -342,11 +343,23 @@ def generate_toolpaths_for_shapes(
 
     _notify(progress_update, "Preparing shapes…")
     if fit_to_bed:
-        _notify(progress_update, "Fitting shapes to printable area…")
-        fitted_shapes, scale_factor = fit_shapes_to_bed(shape_list, config.printer)
+        if scale_factor is None:
+            _notify(progress_update, "Fitting shapes to printable area…")
+            fitted_shapes, applied_scale = fit_shapes_to_bed(shape_list, config.printer)
+        else:
+            _notify(progress_update, f"Scaling shapes by factor {scale_factor:g}…")
+            fitted_shapes, applied_scale = place_shapes_on_bed(
+                shape_list,
+                config.printer,
+                scale_factor,
+            )
     else:
+        if scale_factor is not None:
+            raise ValueError(
+                "Manual scale requires fit_to_bed=True so SVG coordinates can be placed on the build plate."
+            )
         fitted_shapes = shape_list
-        scale_factor = 1.0
+        applied_scale = 1.0
     _notify(progress_update, "Generating toolpaths…")
     toolpaths = _build_toolpaths(
         fitted_shapes,
@@ -356,7 +369,7 @@ def generate_toolpaths_for_shapes(
     if not toolpaths:
         raise RuntimeError("No toolpaths were generated from the SVG.")
     _notify(progress_update, "Toolpaths ready.")
-    return toolpaths, scale_factor
+    return toolpaths, applied_scale
 
 
 @dataclass
@@ -532,10 +545,48 @@ def write_toolpaths_to_gcode(
     return GcodeWriteResult(line_count=len(gcode_lines), color_order=color_order)
 
 
-def slice_svg_to_gcode(svg_path: Path, output_path: Path, config: SlicerConfig, preview: bool, preview_file: Path | None) -> None:
+def _parse_scale_argument(value: str) -> Optional[float]:
+    normalized = value.strip().lower()
+    if normalized in {"auto", "fit", "fit-to-bed"}:
+        return None
+    if normalized in {"none", "no", "off"}:
+        return 1.0
+
+    try:
+        if normalized.endswith("%"):
+            scale = float(normalized[:-1]) / 100.0
+        else:
+            scale = float(normalized)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "scale must be 'auto', 'none', a positive factor such as 1 or 0.5, "
+            "or a percent such as 100%"
+        ) from exc
+
+    if not math.isfinite(scale) or scale <= 0:
+        raise argparse.ArgumentTypeError("scale must be greater than zero")
+    return scale
+
+
+def slice_svg_to_gcode(
+    svg_path: Path,
+    output_path: Path,
+    config: SlicerConfig,
+    preview: bool,
+    preview_file: Path | None,
+    *,
+    scale_factor: Optional[float] = None,
+) -> None:
     shapes = parse_svg(str(svg_path), config.sampling)
-    toolpaths, scale_factor = generate_toolpaths_for_shapes(shapes, config)
-    logger.info("Scaled SVG by factor %.3f to fit printable area", scale_factor)
+    toolpaths, applied_scale = generate_toolpaths_for_shapes(
+        shapes,
+        config,
+        scale_factor=scale_factor,
+    )
+    if scale_factor is None:
+        logger.info("Scaled SVG by factor %.3f to fit printable area", applied_scale)
+    else:
+        logger.info("Applied SVG scale factor %.3f", applied_scale)
 
     write_toolpaths_to_gcode(toolpaths, output_path, config)
 
@@ -567,6 +618,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity",
+    )
+    parser.add_argument(
+        "--scale",
+        type=_parse_scale_argument,
+        default=None,
+        metavar="FACTOR",
+        help=(
+            "Scale SVG by FACTOR before placing it on the print area. "
+            "Use 'auto' to fit to the printable area (default), or 'none'/1 for no scaling."
+        ),
     )
     parser.add_argument(
         "--color-mode",
@@ -609,7 +670,14 @@ def main(argv: List[str] | None = None) -> int:
         return 1
 
     try:
-        slice_svg_to_gcode(args.svg, args.output, config, args.preview, args.preview_file)
+        slice_svg_to_gcode(
+            args.svg,
+            args.output,
+            config,
+            args.preview,
+            args.preview_file,
+            scale_factor=args.scale,
+        )
     except Exception as exc:  # pragma: no cover - CLI surface
         logger.error("Failed to slice SVG: %s", exc)
         return 1

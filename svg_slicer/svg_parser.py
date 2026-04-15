@@ -5,7 +5,6 @@ import math
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
-from PIL import Image as PILImage
 from shapely.affinity import affine_transform as shapely_affine_transform
 from shapely.affinity import scale as shapely_scale
 from shapely.affinity import translate as shapely_translate
@@ -13,8 +12,6 @@ from shapely.geometry import GeometryCollection, LineString, MultiLineString, Po
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 from svgelements import Arc, ClipPath, Color, Image, Line, Move, Path, SVG, Text
-from matplotlib.font_manager import FontProperties
-from matplotlib.textpath import TextPath
 
 from .config import PrinterConfig, SamplingConfig
 
@@ -253,7 +250,9 @@ def _normalize_font_weight(weight) -> str | int:
     return "normal"
 
 
-def _font_properties_for_text(element: Text, font_size: float) -> FontProperties:
+def _font_properties_for_text(element: Text, font_size: float):
+    from matplotlib.font_manager import FontProperties
+
     family = getattr(element, "font_family", None)
     if isinstance(family, str):
         families = [f.strip().strip("'\"") for f in family.split(",") if f.strip()]
@@ -281,6 +280,8 @@ def _text_to_polygons(element: Text, tolerance: float) -> List[Polygon]:
         return []
 
     try:
+        from matplotlib.textpath import TextPath
+
         font_props = _font_properties_for_text(element, font_size)
         text_path = TextPath(
             (0, 0),
@@ -614,6 +615,12 @@ def _image_to_shape_geometries(
     if columns == 0 or rows == 0:
         return shapes
 
+    try:
+        from PIL import Image as PILImage
+    except Exception as exc:  # pragma: no cover - optional raster dependency
+        logger.debug("Skipping image because Pillow is unavailable: %s", exc)
+        return shapes
+
     resized = pil_image.convert("RGBA").resize((columns, rows), PILImage.BILINEAR)
     pixels = resized.load()
 
@@ -873,38 +880,36 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
     return _resolve_visibility(shapes)
 
 
-def fit_shapes_to_bed(shapes: List[ShapeGeometry], printer: PrinterConfig) -> Tuple[List[ShapeGeometry], float]:
-    if not shapes:
-        return [], 1.0
-
+def _combined_shape_bounds(shapes: List[ShapeGeometry]) -> Tuple[float, float, float, float, float, float]:
     combined = shapes[0].geometry
     for shape in shapes[1:]:
         combined = combined.union(shape.geometry)
 
     minx, miny, maxx, maxy = combined.bounds
+    if not all(math.isfinite(value) for value in (minx, miny, maxx, maxy)):
+        raise ValueError("SVG bounds are invalid; cannot scale.")
     width = maxx - minx
     height = maxy - miny
     if width == 0 and height == 0:
         raise ValueError("SVG has zero width or height after parsing; cannot scale.")
+    return minx, miny, maxx, maxy, width, height
 
-    available_width = printer.printable_width
-    available_height = printer.printable_depth
-    scale_candidates: List[float] = []
-    if width > 0:
-        scale_candidates.append(available_width / width)
-    if height > 0:
-        scale_candidates.append(available_height / height)
-    if not scale_candidates:
-        raise ValueError("Printer has no printable area; cannot scale SVG.")
-    scale_factor = min(scale_candidates)
 
-    # Pre-compute translation and scaling parameters.
+def _place_shapes_with_bounds(
+    shapes: List[ShapeGeometry],
+    printer: PrinterConfig,
+    scale_factor: float,
+    minx: float,
+    miny: float,
+    height: float,
+) -> Tuple[List[ShapeGeometry], float]:
+    scaled_height = height * scale_factor
+
     translated_shapes: List[ShapeGeometry] = []
     for shape in shapes:
         geom = shapely_translate(shape.geometry, xoff=-minx, yoff=-miny)
         geom = shapely_scale(geom, xfact=scale_factor, yfact=scale_factor, origin=(0, 0))
         geom = shapely_scale(geom, xfact=1.0, yfact=-1.0, origin=(0, 0))
-        scaled_height = height * scale_factor
         geom = shapely_translate(geom, xoff=printer.x_min, yoff=printer.y_min + scaled_height)
         centerline_geometry = shape.centerline_geometry
         if centerline_geometry is not None:
@@ -938,3 +943,37 @@ def fit_shapes_to_bed(shapes: List[ShapeGeometry], printer: PrinterConfig) -> Tu
         )
 
     return translated_shapes, scale_factor
+
+
+def place_shapes_on_bed(
+    shapes: List[ShapeGeometry],
+    printer: PrinterConfig,
+    scale_factor: float,
+) -> Tuple[List[ShapeGeometry], float]:
+    if not shapes:
+        return [], scale_factor
+    if not math.isfinite(scale_factor) or scale_factor <= 0:
+        raise ValueError("Scale factor must be greater than zero.")
+
+    minx, miny, _, _, _, height = _combined_shape_bounds(shapes)
+    return _place_shapes_with_bounds(shapes, printer, scale_factor, minx, miny, height)
+
+
+def fit_shapes_to_bed(shapes: List[ShapeGeometry], printer: PrinterConfig) -> Tuple[List[ShapeGeometry], float]:
+    if not shapes:
+        return [], 1.0
+
+    minx, miny, _, _, width, height = _combined_shape_bounds(shapes)
+
+    available_width = printer.printable_width
+    available_height = printer.printable_depth
+    scale_candidates: List[float] = []
+    if width > 0:
+        scale_candidates.append(available_width / width)
+    if height > 0:
+        scale_candidates.append(available_height / height)
+    if not scale_candidates:
+        raise ValueError("Printer has no printable area; cannot scale SVG.")
+    scale_factor = min(scale_candidates)
+
+    return _place_shapes_with_bounds(shapes, printer, scale_factor, minx, miny, height)
