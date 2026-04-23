@@ -26,7 +26,14 @@ from .config import SlicerConfig, load_config
 from .gcode import GcodeGenerator, Toolpath, toolpaths_from_polylines
 from .infill import generate_rectilinear_infill
 from .preview import render_toolpaths
-from .svg_parser import ShapeGeometry, fit_shapes_to_bed, parse_svg, place_shapes_on_bed
+from .svg_parser import (
+    VALID_ALIGNMENTS,
+    ShapeGeometry,
+    fit_shapes_to_bed,
+    normalize_alignment,
+    parse_svg,
+    place_shapes_on_bed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -335,23 +342,30 @@ def generate_toolpaths_for_shapes(
     *,
     fit_to_bed: bool = True,
     scale_factor: Optional[float] = None,
+    alignment: str = "center",
     progress_update: Optional[ProgressCallback] = None,
 ) -> Tuple[List[Toolpath], float]:
     shape_list = list(shapes)
     if not shape_list:
         raise RuntimeError("No drawable shapes with fills were found in the SVG.")
+    alignment = normalize_alignment(alignment)
 
     _notify(progress_update, "Preparing shapes…")
     if fit_to_bed:
         if scale_factor is None:
             _notify(progress_update, "Fitting shapes to printable area…")
-            fitted_shapes, applied_scale = fit_shapes_to_bed(shape_list, config.printer)
+            fitted_shapes, applied_scale = fit_shapes_to_bed(
+                shape_list,
+                config.printer,
+                alignment=alignment,
+            )
         else:
             _notify(progress_update, f"Scaling shapes by factor {scale_factor:g}…")
             fitted_shapes, applied_scale = place_shapes_on_bed(
                 shape_list,
                 config.printer,
                 scale_factor,
+                alignment=alignment,
             )
     else:
         if scale_factor is not None:
@@ -568,6 +582,13 @@ def _parse_scale_argument(value: str) -> Optional[float]:
     return scale
 
 
+def _parse_alignment_argument(value: str) -> str:
+    try:
+        return normalize_alignment(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def slice_svg_to_gcode(
     svg_path: Path,
     output_path: Path,
@@ -576,12 +597,14 @@ def slice_svg_to_gcode(
     preview_file: Path | None,
     *,
     scale_factor: Optional[float] = None,
+    alignment: str = "center",
 ) -> None:
     shapes = parse_svg(str(svg_path), config.sampling)
     toolpaths, applied_scale = generate_toolpaths_for_shapes(
         shapes,
         config,
         scale_factor=scale_factor,
+        alignment=alignment,
     )
     if scale_factor is None:
         logger.info("Scaled SVG by factor %.3f to fit printable area", applied_scale)
@@ -627,6 +650,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help=(
             "Scale SVG by FACTOR before placing it on the print area. "
             "Use 'auto' to fit to the printable area (default), or 'none'/1 for no scaling."
+        ),
+    )
+    parser.add_argument(
+        "--alignment",
+        type=_parse_alignment_argument,
+        default="center",
+        choices=VALID_ALIGNMENTS,
+        metavar="POSITION",
+        help=(
+            "Place the SVG within the printable area using POSITION. "
+            "Choices: top-left, top-middle, top-right, center-left, center, "
+            "center-right, bottom-left, bottom-middle, bottom-right."
         ),
     )
     parser.add_argument(
@@ -677,6 +712,7 @@ def main(argv: List[str] | None = None) -> int:
             args.preview,
             args.preview_file,
             scale_factor=args.scale,
+            alignment=args.alignment,
         )
     except Exception as exc:  # pragma: no cover - CLI surface
         logger.error("Failed to slice SVG: %s", exc)

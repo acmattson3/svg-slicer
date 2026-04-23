@@ -110,6 +110,7 @@ Common flags:
 
 - `--preview` opens an interactive Matplotlib window; `--preview-file` saves the image instead.
 - `--scale auto` fits artwork to the printable area (default). Use `--scale none`, `--scale 1`, or another positive factor such as `--scale 0.5` to choose the SVG scale manually.
+- `--alignment <position>` places artwork inside the printable area. The default is `center`. Supported values are `top-left`, `top-middle`, `top-right`, `center-left`, `center`, `center-right`, `bottom-left`, `bottom-middle`, and `bottom-right`.
 - `--color-mode` or `--bw-mode` override the profile default for a single run.
 - `--log-level` adjusts verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`).
 

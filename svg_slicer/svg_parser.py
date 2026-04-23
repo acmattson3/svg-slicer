@@ -18,6 +18,30 @@ from .config import PrinterConfig, SamplingConfig
 
 logger = logging.getLogger(__name__)
 
+VALID_ALIGNMENTS = (
+    "top-left",
+    "top-middle",
+    "top-right",
+    "center-left",
+    "center",
+    "center-right",
+    "bottom-left",
+    "bottom-middle",
+    "bottom-right",
+)
+
+_ALIGNMENT_FACTORS = {
+    "top-left": (0.0, 0.0),
+    "top-middle": (0.5, 0.0),
+    "top-right": (1.0, 0.0),
+    "center-left": (0.0, 0.5),
+    "center": (0.5, 0.5),
+    "center-right": (1.0, 0.5),
+    "bottom-left": (0.0, 1.0),
+    "bottom-middle": (0.5, 1.0),
+    "bottom-right": (1.0, 1.0),
+}
+
 
 @dataclass
 class ShapeGeometry:
@@ -26,6 +50,26 @@ class ShapeGeometry:
     stroke_width: float | None = None
     color: tuple[int, int, int] | None = None
     centerline_geometry: BaseGeometry | None = None
+
+
+def normalize_alignment(alignment: str | None) -> str:
+    if alignment is None:
+        return "center"
+
+    normalized = str(alignment).strip().lower()
+    aliases = {
+        "top-center": "top-middle",
+        "middle-left": "center-left",
+        "middle": "center",
+        "middle-center": "center",
+        "middle-right": "center-right",
+        "bottom-center": "bottom-middle",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in _ALIGNMENT_FACTORS:
+        choices = ", ".join(VALID_ALIGNMENTS)
+        raise ValueError(f"Alignment must be one of: {choices}")
+    return normalized
 
 
 def _shoelace_area(points: Sequence[Tuple[float, float]]) -> float:
@@ -913,16 +957,25 @@ def _place_shapes_with_bounds(
     scale_factor: float,
     minx: float,
     miny: float,
+    width: float,
     height: float,
+    alignment: str = "center",
 ) -> Tuple[List[ShapeGeometry], float]:
+    alignment = normalize_alignment(alignment)
+    x_factor, y_factor = _ALIGNMENT_FACTORS[alignment]
+    scaled_width = width * scale_factor
     scaled_height = height * scale_factor
+    x_margin = (printer.printable_width - scaled_width) * x_factor
+    y_margin = (printer.printable_depth - scaled_height) * y_factor
+    x_offset = printer.x_min + x_margin
+    y_offset = printer.y_min + y_margin + scaled_height
 
     translated_shapes: List[ShapeGeometry] = []
     for shape in shapes:
         geom = shapely_translate(shape.geometry, xoff=-minx, yoff=-miny)
         geom = shapely_scale(geom, xfact=scale_factor, yfact=scale_factor, origin=(0, 0))
         geom = shapely_scale(geom, xfact=1.0, yfact=-1.0, origin=(0, 0))
-        geom = shapely_translate(geom, xoff=printer.x_min, yoff=printer.y_min + scaled_height)
+        geom = shapely_translate(geom, xoff=x_offset, yoff=y_offset)
         centerline_geometry = shape.centerline_geometry
         if centerline_geometry is not None:
             centerline_geometry = shapely_translate(centerline_geometry, xoff=-minx, yoff=-miny)
@@ -940,8 +993,8 @@ def _place_shapes_with_bounds(
             )
             centerline_geometry = shapely_translate(
                 centerline_geometry,
-                xoff=printer.x_min,
-                yoff=printer.y_min + scaled_height,
+                xoff=x_offset,
+                yoff=y_offset,
             )
         stroke_width = None if shape.stroke_width is None else shape.stroke_width * scale_factor
         translated_shapes.append(
@@ -961,17 +1014,31 @@ def place_shapes_on_bed(
     shapes: List[ShapeGeometry],
     printer: PrinterConfig,
     scale_factor: float,
+    alignment: str = "center",
 ) -> Tuple[List[ShapeGeometry], float]:
     if not shapes:
         return [], scale_factor
     if not math.isfinite(scale_factor) or scale_factor <= 0:
         raise ValueError("Scale factor must be greater than zero.")
 
-    minx, miny, _, _, _, height = _combined_shape_bounds(shapes)
-    return _place_shapes_with_bounds(shapes, printer, scale_factor, minx, miny, height)
+    minx, miny, _, _, width, height = _combined_shape_bounds(shapes)
+    return _place_shapes_with_bounds(
+        shapes,
+        printer,
+        scale_factor,
+        minx,
+        miny,
+        width,
+        height,
+        alignment=alignment,
+    )
 
 
-def fit_shapes_to_bed(shapes: List[ShapeGeometry], printer: PrinterConfig) -> Tuple[List[ShapeGeometry], float]:
+def fit_shapes_to_bed(
+    shapes: List[ShapeGeometry],
+    printer: PrinterConfig,
+    alignment: str = "center",
+) -> Tuple[List[ShapeGeometry], float]:
     if not shapes:
         return [], 1.0
 
@@ -988,4 +1055,13 @@ def fit_shapes_to_bed(shapes: List[ShapeGeometry], printer: PrinterConfig) -> Tu
         raise ValueError("Printer has no printable area; cannot scale SVG.")
     scale_factor = min(scale_candidates)
 
-    return _place_shapes_with_bounds(shapes, printer, scale_factor, minx, miny, height)
+    return _place_shapes_with_bounds(
+        shapes,
+        printer,
+        scale_factor,
+        minx,
+        miny,
+        width,
+        height,
+        alignment=alignment,
+    )
