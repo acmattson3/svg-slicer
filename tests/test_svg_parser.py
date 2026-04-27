@@ -6,7 +6,13 @@ import pytest
 from shapely.geometry import LineString, Polygon
 
 from svg_slicer.config import PrinterConfig
-from svg_slicer.svg_parser import ShapeGeometry, fit_shapes_to_bed, parse_svg, place_shapes_on_bed
+from svg_slicer.svg_parser import (
+    ShapeGeometry,
+    _raster_pil_image_to_shape_geometries,
+    fit_shapes_to_bed,
+    parse_svg,
+    place_shapes_on_bed,
+)
 
 
 def test_parse_svg_basic_fill(simple_svg_path: Path, slicer_config) -> None:
@@ -214,6 +220,26 @@ def test_parse_svg_hershey_text_normalizes_outer_and_tab_whitespace(tmp_path: Pa
     )
 
     assert spaced_width == pytest.approx(normal_width, rel=1e-6)
+
+
+def test_raster_image_sampling_outputs_alternating_scanlines(slicer_config) -> None:
+    pil_image_module = pytest.importorskip("PIL.Image")
+    image = pil_image_module.new("RGBA", (3, 2), (0, 0, 0, 255))
+    slicer_config.sampling.raster_sample_spacing = 1.0
+    slicer_config.sampling.raster_max_cells = 100
+
+    shapes = _raster_pil_image_to_shape_geometries(
+        image,
+        (0.0, 0.0, 3.0, 2.0),
+        slicer_config.sampling,
+        None,
+    )
+
+    assert len(shapes) == 2
+    assert all(isinstance(shape.geometry, LineString) for shape in shapes)
+    assert all(shape.toolpath_tag == "raster" for shape in shapes)
+    assert list(shapes[0].geometry.coords) == pytest.approx([(0.0, 0.5), (3.0, 0.5)])
+    assert list(shapes[1].geometry.coords) == pytest.approx([(3.0, 1.5), (0.0, 1.5)])
 
 
 def test_fit_shapes_to_bed_scales_into_printable_area(slicer_config) -> None:

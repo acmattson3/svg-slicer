@@ -10,6 +10,7 @@ Under the hood the slicer resolves fills, strokes, and text into geometry, appli
 - Built-in configuration editor loads/saves YAML printer profiles including bed limits, feedrates, start/end sequences, pause scripts, and colour palettes.
 - Palette-aware colour workflow maps artwork fills/strokes to the nearest configured colour, batches passes in least-used order, and inserts your pause script (default `M600`) while logging the planned colour order.
 - Black-and-white mode converts fills to grayscale, driving density-scaled cross-hatch infill with perimeter glides to minimise pen lifts while thick strokes receive dedicated outline passes.
+- Embedded raster images are converted into colour-aware alternating scanline passes, preserving vector artwork as vectors while plotting image regions as pen strokes.
 - Automatically tessellates SVG `<text>` via Matplotlib fonts, can replace text with Hershey single-line strokes, converts thick strokes into filled regions, and honours SVG z-order so upper shapes mask lower ones.
 - Imports PDF pages with a hybrid path: vector drawing operators remain vectors, PDF text becomes Hershey strokes, and embedded raster images are sampled with the existing raster sampling settings.
 - Optional Matplotlib preview renders only drawing moves; you can display it interactively or export a PNG for headless environments.
@@ -42,7 +43,7 @@ Edit `config.yaml` to match your machine. Printer settings can be grouped into n
 - `printers.<profile>.name`: friendly printer label used in logs and previews.
 - `printers.<profile>.bed_size_mm.width|depth`: overall bed dimensions.
 - `printers.<profile>.origin_offsets_mm.x_min|x_max|y_min|y_max`: usable XY window inside the physical bed.
-- `printers.<profile>.z_heights_mm.draw|travel`: Z heights for pen-down and pen-up moves; `z_lift_height_mm` optionally overrides lift distance.
+- `printers.<profile>.z_heights_mm.draw|travel|raster_travel`: Z heights for pen-down, normal pen-up, and raster pen-up moves; `raster_travel` defaults to `travel` when omitted and `z_lift_height_mm` optionally overrides lift distance.
 - `printers.<profile>.draw_command` / `lift_command`: optional pen-down and pen-up G-code commands. When set, these commands are emitted instead of the matching Z move.
 - `printers.<profile>.draw_move_command` / `travel_move_command`: optional XY movement command words for pen-down and pen-up moves. Defaults are `G1` for drawing and `G0` for travel.
 - `printers.<profile>.plot_mode`: optional stroke handling mode. Use `trace` for the default stroke-outline behavior, `centerline` to draw SVG strokes as single paths, or `auto` to centerline strokes no wider than the configured pen width.
@@ -54,7 +55,7 @@ Edit `config.yaml` to match your machine. Printer settings can be grouped into n
 - `printers.<profile>.pause_gcode`: commands executed between colour batches (defaults to `["M600"]` if omitted).
 - `infill.base_line_spacing_mm`, `min_density`, `max_density`, `angles_degrees`: tune cross-hatch spacing, density range, and rotation angles.
 - `perimeter.thickness_mm`, `count`, `min_fill_width_mm`, `min_fill_mode`: outline line width, number of perimeter loops, the minimum feature-size threshold for infill, and how that threshold is measured (`min` for minimum local thickness, default; `max` for any dimension).
-- `sampling.segment_length_tolerance_mm`, `outline_simplify_tolerance_mm`, `curve_detail_scale`: geometry sampling controls that balance fidelity against speed. `sampling.plot_mode` and `sampling.plot_stroke_width_threshold_mm` can also set the stroke handling mode and auto threshold globally when you are not using per-printer profiles.
+- `sampling.segment_length_tolerance_mm`, `outline_simplify_tolerance_mm`, `curve_detail_scale`, `raster_sample_spacing_mm`, `raster_max_cells`: geometry and raster sampling controls that balance fidelity against speed. `sampling.plot_mode` and `sampling.plot_stroke_width_threshold_mm` can also set the stroke handling mode and auto threshold globally when you are not using per-printer profiles.
 - `rendering.preview_line_width_mm`: stroke width used in Matplotlib previews.
 
 The sample configuration contains Ender 3 Pro and Prusa XL profiles as references.

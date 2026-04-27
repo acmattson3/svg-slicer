@@ -53,6 +53,7 @@ class ShapeGeometry:
     stroke_width: float | None = None
     color: tuple[int, int, int] | None = None
     centerline_geometry: BaseGeometry | None = None
+    toolpath_tag: str | None = None
 
 
 def normalize_alignment(alignment: str | None) -> str:
@@ -688,6 +689,7 @@ def _resolve_visibility(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]:
                         stroke_width=shape.stroke_width,
                         color=shape.color,
                         centerline_geometry=shape.centerline_geometry,
+                        toolpath_tag=shape.toolpath_tag,
                     )
                 )
             continue
@@ -710,6 +712,7 @@ def _resolve_visibility(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]:
                         if shape.centerline_geometry is not None
                         else None
                     ),
+                    toolpath_tag=shape.toolpath_tag,
                 )
             )
             polys_for_union.append(polygon)
@@ -802,7 +805,8 @@ def _raster_pil_image_to_shape_geometries(
         logger.debug("Skipping image because Pillow is unavailable: %s", exc)
         return shapes
 
-    resized = pil_image.convert("RGBA").resize((columns, rows), PILImage.BILINEAR)
+    resampling = getattr(PILImage, "Resampling", PILImage)
+    resized = pil_image.convert("RGBA").resize((columns, rows), resampling.BILINEAR)
     pixels = resized.load()
 
     if transform_params is None:
@@ -829,35 +833,33 @@ def _raster_pil_image_to_shape_geometries(
             )
         else:
             rgb = None
-        x0 = run["start"] / columns
-        x1 = run["end"] / columns
-        if x1 <= x0:
+        left = run["start"] / columns
+        right = run["end"] / columns
+        if math.isclose(left, right, abs_tol=1e-12):
             return
+        x0, x1 = (right, left) if run["row"] % 2 else (left, right)
         row_index = run["row"]
-        y0 = row_index / rows
-        y1 = (row_index + 1) / rows
-        if y1 <= y0:
+        y = (row_index + 0.5) / rows
+        base_line = LineString([(x0, y), (x1, y)])
+        if base_line.is_empty or base_line.length <= 0:
             return
-        base_poly = Polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
-        if base_poly.is_empty or base_poly.area <= 0:
-            return
-        transformed = shapely_affine_transform(base_poly, transform_params)
-        if transformed.is_empty or transformed.area <= 0:
+        transformed = shapely_affine_transform(base_line, transform_params)
+        if transformed.is_empty or transformed.length <= 0:
             return
         if clip_geom is not None:
-            polygons = _apply_clip([transformed], clip_geom)
+            lines = _apply_clip_to_lines([transformed], clip_geom)
         else:
-            polygons = [transformed]
-        for polygon in polygons:
-            polygon = polygon.buffer(0)
-            if polygon.is_empty or polygon.area <= 0:
+            lines = [transformed]
+        for line in lines:
+            if line.is_empty or line.length <= 0:
                 continue
             shapes.append(
                 ShapeGeometry(
-                    geometry=polygon,
+                    geometry=line,
                     brightness=brightness,
-                    stroke_width=None,
+                    stroke_width=0.0,
                     color=rgb,
+                    toolpath_tag="raster",
                 )
             )
 
@@ -1206,6 +1208,7 @@ def _place_shapes_with_bounds(
                 stroke_width=stroke_width,
                 color=shape.color,
                 centerline_geometry=centerline_geometry,
+                toolpath_tag=shape.toolpath_tag,
             )
         )
 
