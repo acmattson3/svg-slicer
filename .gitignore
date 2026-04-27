@@ -28,4 +28,3 @@ examples/i-love-katherine.svg
 # Local-only working files in this clone
 requirements.txt
 svg_slicer/handwriting_*.py
-tests/
