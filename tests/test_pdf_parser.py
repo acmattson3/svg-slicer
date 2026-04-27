@@ -44,3 +44,67 @@ def test_parse_pdf_uses_selected_page(tmp_path: Path, slicer_config) -> None:
     assert miny == pytest.approx(40.0)
     assert maxx == pytest.approx(80.0)
     assert maxy == pytest.approx(80.0)
+
+
+def test_parse_pdf_hershey_text_fits_span_bounds(tmp_path: Path, slicer_config) -> None:
+    fitz = pytest.importorskip("fitz")
+
+    path = tmp_path / "text_fit.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=180, height=90)
+    page.insert_text((20, 50), "Wide Text", fontsize=24, color=(0, 0, 0))
+    doc.save(str(path))
+    doc.close()
+
+    doc = fitz.open(str(path))
+    span_bbox = doc[0].get_text("rawdict")["blocks"][0]["lines"][0]["spans"][0]["bbox"]
+    doc.close()
+
+    shapes = parse_artwork(path, slicer_config.sampling, pdf_page=1)
+    line_shapes = [shape for shape in shapes if isinstance(shape.geometry, LineString)]
+    assert line_shapes
+
+    bounds = [shape.geometry.bounds for shape in line_shapes]
+    minx = min(bound[0] for bound in bounds)
+    miny = min(bound[1] for bound in bounds)
+    maxx = max(bound[2] for bound in bounds)
+    maxy = max(bound[3] for bound in bounds)
+
+    assert minx >= span_bbox[0] - 1e-6
+    assert miny >= span_bbox[1] - 1e-6
+    assert maxx <= span_bbox[2] + 1e-6
+    assert maxy <= span_bbox[3] + 1e-6
+
+
+def test_parse_pdf_hershey_text_normalizes_tab_split_spans(tmp_path: Path, slicer_config) -> None:
+    fitz = pytest.importorskip("fitz")
+
+    normal_path = tmp_path / "normal_sentence.pdf"
+    spaced_path = tmp_path / "spaced_sentence.pdf"
+    for path, text in [
+        (normal_path, "The dog ran fast"),
+        (spaced_path, "  The\tdog ran   fast  "),
+    ]:
+        doc = fitz.open()
+        page = doc.new_page(width=260, height=90)
+        page.insert_text((20, 50), text, fontsize=18, color=(0, 0, 0))
+        doc.save(str(path))
+        doc.close()
+
+    normal_shapes = [
+        shape for shape in parse_artwork(normal_path, slicer_config.sampling, pdf_page=1)
+        if isinstance(shape.geometry, LineString)
+    ]
+    spaced_shapes = [
+        shape for shape in parse_artwork(spaced_path, slicer_config.sampling, pdf_page=1)
+        if isinstance(shape.geometry, LineString)
+    ]
+
+    normal_width = max(shape.geometry.bounds[2] for shape in normal_shapes) - min(
+        shape.geometry.bounds[0] for shape in normal_shapes
+    )
+    spaced_width = max(shape.geometry.bounds[2] for shape in spaced_shapes) - min(
+        shape.geometry.bounds[0] for shape in spaced_shapes
+    )
+
+    assert spaced_width == pytest.approx(normal_width, rel=0.05)

@@ -12,9 +12,11 @@ from .config import SamplingConfig
 from .svg_parser import (
     ShapeGeometry,
     _color_to_brightness,
+    _fit_lines_to_bounds,
     _geometry_to_lines,
     _geometry_to_polygons,
     _hershey_lines_for_text,
+    _normalize_hershey_text,
     _raster_pil_image_to_shape_geometries,
     _resolve_visibility,
 )
@@ -169,32 +171,79 @@ def _text_block_to_shapes(block) -> List[ShapeGeometry]:
         angle = math.atan2(float(direction[1]), float(direction[0]))
         cos_a = math.cos(angle)
         sin_a = math.sin(angle)
-        for span in line.get("spans", []):
-            text = "".join(char.get("c", "") for char in span.get("chars", []))
-            if not text:
-                continue
-            origin = span.get("origin") or line.get("origin") or (0.0, 0.0)
-            size = float(span.get("size") or 12.0)
-            rgb = _pdf_rgb_to_tuple(span.get("color")) or (0, 0, 0)
-            raw_lines = _hershey_lines_for_text(
-                text,
-                x_base=0.0,
-                y_base=0.0,
-                font_size=size,
-            )
-            transform = [cos_a, sin_a, -sin_a, cos_a, float(origin[0]), float(origin[1])]
-            for hershey_line in raw_lines:
-                geom = shapely_affine_transform(hershey_line, transform)
-                if geom.is_empty or geom.length <= 0:
-                    continue
-                shapes.append(
-                    ShapeGeometry(
-                        geometry=geom,
-                        brightness=_rgb_to_brightness(rgb),
-                        stroke_width=0.0,
-                        color=rgb,
-                    )
+        spans = line.get("spans", [])
+        if not spans:
+            continue
+
+        text_parts = [
+            "".join(char.get("c", "") for char in span.get("chars", []))
+            for span in spans
+        ]
+        text = _normalize_hershey_text(" ".join(part for part in text_parts if part))
+        if not text:
+            continue
+
+        first_span = spans[0]
+        origin = line.get("origin") or first_span.get("origin") or (0.0, 0.0)
+        size = float(first_span.get("size") or 12.0)
+        rgb = _pdf_rgb_to_tuple(first_span.get("color")) or (0, 0, 0)
+        raw_lines = _hershey_lines_for_text(
+            text,
+            x_base=0.0,
+            y_base=0.0,
+            font_size=size,
+        )
+        transform = [cos_a, sin_a, -sin_a, cos_a, float(origin[0]), float(origin[1])]
+        transformed_lines = [
+            shapely_affine_transform(hershey_line, transform)
+            for hershey_line in raw_lines
+        ]
+
+        span_bounds = [span.get("bbox") for span in spans if span.get("bbox") and len(span.get("bbox")) >= 4]
+        nonspace_chars = [
+            char
+            for span in spans
+            for char in span.get("chars", [])
+            if not str(char.get("c", "")).isspace() and char.get("bbox") and len(char.get("bbox")) >= 4
+        ]
+        target_bounds = None
+        if span_bounds and nonspace_chars:
+            try:
+                import fitz
+
+                first_bbox = nonspace_chars[0]["bbox"]
+                text_width = fitz.get_text_length(
+                    text,
+                    fontname=first_span.get("font") or "helv",
+                    fontsize=size,
                 )
+                if abs(sin_a) < 1e-7:
+                    target_bounds = (
+                        float(first_bbox[0]),
+                        min(float(bbox[1]) for bbox in span_bounds),
+                        float(first_bbox[0]) + text_width,
+                        max(float(bbox[3]) for bbox in span_bounds),
+                    )
+            except Exception:
+                target_bounds = None
+        if target_bounds is None and span_bounds:
+            target_bounds = (
+                min(float(bbox[0]) for bbox in span_bounds),
+                min(float(bbox[1]) for bbox in span_bounds),
+                max(float(bbox[2]) for bbox in span_bounds),
+                max(float(bbox[3]) for bbox in span_bounds),
+            )
+        for geom in _fit_lines_to_bounds(transformed_lines, target_bounds):
+            if geom.is_empty or geom.length <= 0:
+                continue
+            shapes.append(
+                ShapeGeometry(
+                    geometry=geom,
+                    brightness=_rgb_to_brightness(rgb),
+                    stroke_width=0.0,
+                    color=rgb,
+                )
+            )
     return shapes
 
 

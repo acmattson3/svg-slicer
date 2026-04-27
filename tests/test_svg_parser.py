@@ -139,6 +139,83 @@ def test_parse_svg_missing_font_falls_back_to_hershey(tmp_path: Path, slicer_con
     assert all(isinstance(shape.geometry, LineString) for shape in shapes)
 
 
+def test_parse_svg_hershey_text_fits_original_text_bounds(tmp_path: Path, slicer_config) -> None:
+    pytest.importorskip("HersheyFonts")
+
+    def write_text_svg(path: Path, font_family: str = "") -> None:
+        font_attr = f' font-family="{font_family}"' if font_family else ""
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="80">\n'
+            f'<text x="20" y="50" font-size="24"{font_attr} fill="#000000">Wide Text</text>\n'
+            "</svg>\n"
+        )
+        path.write_text(svg, encoding="utf-8")
+
+    path = tmp_path / "fit_text.svg"
+    write_text_svg(path)
+
+    outline_shapes = parse_svg(str(path), slicer_config.sampling)
+    hershey_shapes = parse_svg(str(path), slicer_config.sampling, force_hershey_text=True)
+
+    missing_font_path = tmp_path / "fit_missing_font_text.svg"
+    write_text_svg(missing_font_path, "DefinitelyMissingPlotterFont")
+    fallback_outline_shapes = parse_svg(str(path), slicer_config.sampling)
+    missing_font_hershey_shapes = parse_svg(str(missing_font_path), slicer_config.sampling)
+
+    def combined_bounds(shapes):
+        bounds = [shape.geometry.bounds for shape in shapes]
+        return (
+            min(bound[0] for bound in bounds),
+            min(bound[1] for bound in bounds),
+            max(bound[2] for bound in bounds),
+            max(bound[3] for bound in bounds),
+        )
+
+    outline_bounds = combined_bounds(outline_shapes)
+    hershey_bounds = combined_bounds(hershey_shapes)
+    fallback_outline_bounds = combined_bounds(fallback_outline_shapes)
+    missing_font_hershey_bounds = combined_bounds(missing_font_hershey_shapes)
+
+    assert hershey_bounds[0] >= outline_bounds[0] - 1e-6
+    assert hershey_bounds[1] >= outline_bounds[1] - 1e-6
+    assert hershey_bounds[2] <= outline_bounds[2] + 1e-6
+    assert hershey_bounds[3] <= outline_bounds[3] + 1e-6
+    assert missing_font_hershey_bounds[0] >= fallback_outline_bounds[0] - 1e-6
+    assert missing_font_hershey_bounds[1] >= fallback_outline_bounds[1] - 1e-6
+    assert missing_font_hershey_bounds[2] <= fallback_outline_bounds[2] + 1e-6
+    assert missing_font_hershey_bounds[3] <= fallback_outline_bounds[3] + 1e-6
+
+
+def test_parse_svg_hershey_text_normalizes_outer_and_tab_whitespace(tmp_path: Path, slicer_config) -> None:
+    pytest.importorskip("HersheyFonts")
+    normal_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">\n'
+        '<text x="20" y="50" font-size="18" fill="#000000">The dog ran fast</text>\n'
+        "</svg>\n"
+    )
+    spaced_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">\n'
+        '<text x="20" y="50" font-size="18" fill="#000000">  The\tdog ran   fast  </text>\n'
+        "</svg>\n"
+    )
+    normal_path = tmp_path / "normal_text.svg"
+    spaced_path = tmp_path / "spaced_text.svg"
+    normal_path.write_text(normal_svg, encoding="utf-8")
+    spaced_path.write_text(spaced_svg, encoding="utf-8")
+
+    normal_shapes = parse_svg(str(normal_path), slicer_config.sampling, force_hershey_text=True)
+    spaced_shapes = parse_svg(str(spaced_path), slicer_config.sampling, force_hershey_text=True)
+
+    normal_width = max(shape.geometry.bounds[2] for shape in normal_shapes) - min(
+        shape.geometry.bounds[0] for shape in normal_shapes
+    )
+    spaced_width = max(shape.geometry.bounds[2] for shape in spaced_shapes) - min(
+        shape.geometry.bounds[0] for shape in spaced_shapes
+    )
+
+    assert spaced_width == pytest.approx(normal_width, rel=1e-6)
+
+
 def test_fit_shapes_to_bed_scales_into_printable_area(slicer_config) -> None:
     shape = ShapeGeometry(
         geometry=Polygon([(0, 0), (40, 0), (40, 20), (0, 20)]),

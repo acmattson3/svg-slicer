@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
@@ -41,6 +42,8 @@ _ALIGNMENT_FACTORS = {
     "bottom-middle": (0.5, 1.0),
     "bottom-right": (1.0, 1.0),
 }
+
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 @dataclass
@@ -327,8 +330,81 @@ def _text_font_available(element: Text, font_size: float) -> bool:
         return False
 
 
-def _text_to_polygons(element: Text, tolerance: float) -> List[Polygon]:
-    text_content = getattr(element, "text", None)
+def _combined_bounds(geometries: Sequence[BaseGeometry]) -> Tuple[float, float, float, float] | None:
+    bounds = [
+        geometry.bounds
+        for geometry in geometries
+        if not geometry.is_empty
+        and len(geometry.bounds) == 4
+        and all(math.isfinite(value) for value in geometry.bounds)
+    ]
+    if not bounds:
+        return None
+    return (
+        min(bound[0] for bound in bounds),
+        min(bound[1] for bound in bounds),
+        max(bound[2] for bound in bounds),
+        max(bound[3] for bound in bounds),
+    )
+
+
+def _fit_lines_to_bounds(
+    lines: List[LineString],
+    target_bounds: Tuple[float, float, float, float] | None,
+) -> List[LineString]:
+    if not lines or target_bounds is None:
+        return lines
+
+    line_bounds = _combined_bounds(lines)
+    if line_bounds is None:
+        return lines
+
+    minx, miny, maxx, maxy = line_bounds
+    target_minx, target_miny, target_maxx, target_maxy = target_bounds
+    width = maxx - minx
+    height = maxy - miny
+    target_width = target_maxx - target_minx
+    target_height = target_maxy - target_miny
+    if width <= 0 or height <= 0 or target_width <= 0 or target_height <= 0:
+        return lines
+
+    scale_factor = min(1.0, target_width / width, target_height / height)
+    target_center_x = target_minx + target_width / 2.0
+    target_center_y = target_miny + target_height / 2.0
+    source_center_x = minx + width / 2.0
+    source_center_y = miny + height / 2.0
+
+    fitted: List[LineString] = []
+    for line in lines:
+        geom = line
+        if scale_factor < 1.0:
+            geom = shapely_scale(
+                geom,
+                xfact=scale_factor,
+                yfact=scale_factor,
+                origin=(source_center_x, source_center_y),
+            )
+        geom = shapely_translate(
+            geom,
+            xoff=target_center_x - source_center_x,
+            yoff=target_center_y - source_center_y,
+        )
+        if not geom.is_empty and geom.length > 0:
+            fitted.append(geom)
+    return fitted
+
+
+def _normalize_hershey_text(text_content: str) -> str:
+    return _WHITESPACE_RE.sub(" ", text_content).strip()
+
+
+def _text_to_polygons(
+    element: Text,
+    tolerance: float,
+    *,
+    text_override: str | None = None,
+) -> List[Polygon]:
+    text_content = text_override if text_override is not None else getattr(element, "text", None)
     if not text_content:
         return []
     font_size_value = getattr(element, "font_size", None)
@@ -440,6 +516,7 @@ def _hershey_lines_for_text(
     font_size: float,
     matrix=None,
 ) -> List[LineString]:
+    text_content = _normalize_hershey_text(text_content)
     if not text_content:
         return []
     try:
@@ -897,8 +974,14 @@ def parse_svg(
 
         if is_text:
             text_font_size = _value_to_float(getattr(element, "font_size", None)) or 16.0
-            if force_hershey_text or not _text_font_available(element, text_font_size):
-                lines = _apply_clip_to_lines(_text_to_hershey_lines(element), clip_geom)
+            font_available = _text_font_available(element, text_font_size)
+            if force_hershey_text or not font_available:
+                normalized_text = _normalize_hershey_text(str(getattr(element, "text", "") or ""))
+                target_bounds = _combined_bounds(
+                    _text_to_polygons(element, tolerance, text_override=normalized_text)
+                )
+                lines = _fit_lines_to_bounds(_text_to_hershey_lines(element), target_bounds)
+                lines = _apply_clip_to_lines(lines, clip_geom)
                 if lines:
                     brightness = _color_to_brightness(fill_color)
                     rgb = _color_to_rgb(fill_color)

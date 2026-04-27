@@ -115,6 +115,7 @@ Common flags:
 - Use a PDF input the same way, adding `--pdf-page 2` to import a specific one-based page. The default is page 1.
 - `--hershey` renders imported text as Hershey single-line strokes. PDF text always uses this path.
 - `--scale auto` fits artwork to the printable area (default). Use `--scale none`, `--scale 1`, or another positive factor such as `--scale 0.5` to choose the artwork scale manually.
+- `--rotate <degrees>` rotates artwork counterclockwise around its center before scaling and placement.
 - `--alignment <position>` places artwork inside the printable area. The default is `center`. Supported values are `top-left`, `top-middle`, `top-right`, `center-left`, `center`, `center-right`, `bottom-left`, `bottom-middle`, and `bottom-right`.
 - `--color-mode` or `--bw-mode` override the profile default for a single run.
 - `--log-level` adjusts verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`).

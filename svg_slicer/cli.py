@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
+from shapely.affinity import rotate as shapely_rotate
 from shapely.geometry import (
     GeometryCollection,
     LinearRing,
@@ -105,6 +106,57 @@ def _geometry_to_polylines(geometry: BaseGeometry) -> List[List[tuple[float, flo
             polylines.extend(_geometry_to_polylines(part))
         return polylines
     return []
+
+
+def _combined_shape_center(shapes: Iterable[ShapeGeometry]) -> tuple[float, float]:
+    bounds = [
+        shape.geometry.bounds
+        for shape in shapes
+        if not shape.geometry.is_empty
+        and len(shape.geometry.bounds) == 4
+        and all(math.isfinite(value) for value in shape.geometry.bounds)
+    ]
+    if not bounds:
+        raise ValueError("Artwork bounds are invalid; cannot rotate.")
+    minx = min(bound[0] for bound in bounds)
+    miny = min(bound[1] for bound in bounds)
+    maxx = max(bound[2] for bound in bounds)
+    maxy = max(bound[3] for bound in bounds)
+    return ((minx + maxx) / 2.0, (miny + maxy) / 2.0)
+
+
+def rotate_shapes(shapes: Iterable[ShapeGeometry], degrees: float) -> List[ShapeGeometry]:
+    shape_list = list(shapes)
+    if not shape_list:
+        return []
+    if math.isclose(degrees % 360.0, 0.0, abs_tol=1e-9):
+        return shape_list
+    origin = _combined_shape_center(shape_list)
+    rotated: List[ShapeGeometry] = []
+    for shape in shape_list:
+        centerline_geometry = shape.centerline_geometry
+        if centerline_geometry is not None:
+            centerline_geometry = shapely_rotate(
+                centerline_geometry,
+                degrees,
+                origin=origin,
+                use_radians=False,
+            )
+        rotated.append(
+            ShapeGeometry(
+                geometry=shapely_rotate(
+                    shape.geometry,
+                    degrees,
+                    origin=origin,
+                    use_radians=False,
+                ),
+                brightness=shape.brightness,
+                stroke_width=shape.stroke_width,
+                color=shape.color,
+                centerline_geometry=centerline_geometry,
+            )
+        )
+    return rotated
 
 
 def _ring_to_polyline(ring: LinearRing, tolerance: float) -> List[tuple[float, float]]:
@@ -343,6 +395,7 @@ def generate_toolpaths_for_shapes(
     fit_to_bed: bool = True,
     scale_factor: Optional[float] = None,
     alignment: str = "center",
+    rotation_degrees: float = 0.0,
     progress_update: Optional[ProgressCallback] = None,
 ) -> Tuple[List[Toolpath], float]:
     shape_list = list(shapes)
@@ -351,6 +404,9 @@ def generate_toolpaths_for_shapes(
     alignment = normalize_alignment(alignment)
 
     _notify(progress_update, "Preparing shapes…")
+    if not math.isclose(rotation_degrees % 360.0, 0.0, abs_tol=1e-9):
+        _notify(progress_update, f"Rotating shapes by {rotation_degrees:g} degrees…")
+        shape_list = rotate_shapes(shape_list, rotation_degrees)
     if fit_to_bed:
         if scale_factor is None:
             _notify(progress_update, "Fitting shapes to printable area…")
@@ -589,6 +645,16 @@ def _parse_alignment_argument(value: str) -> str:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def _parse_rotation_argument(value: str) -> float:
+    try:
+        rotation = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("rotation must be a number of degrees") from exc
+    if not math.isfinite(rotation):
+        raise argparse.ArgumentTypeError("rotation must be finite")
+    return rotation
+
+
 def slice_svg_to_gcode(
     artwork_path: Path,
     output_path: Path,
@@ -600,6 +666,7 @@ def slice_svg_to_gcode(
     alignment: str = "center",
     pdf_page: int = 1,
     force_hershey_text: bool = False,
+    rotation_degrees: float = 0.0,
 ) -> None:
     shapes = parse_artwork(
         artwork_path,
@@ -612,6 +679,7 @@ def slice_svg_to_gcode(
         config,
         scale_factor=scale_factor,
         alignment=alignment,
+        rotation_degrees=rotation_degrees,
     )
     if scale_factor is None:
         logger.info("Scaled artwork by factor %.3f to fit printable area", applied_scale)
@@ -670,6 +738,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "Choices: top-left, top-middle, top-right, center-left, center, "
             "center-right, bottom-left, bottom-middle, bottom-right."
         ),
+    )
+    parser.add_argument(
+        "--rotate",
+        type=_parse_rotation_argument,
+        default=0.0,
+        metavar="DEGREES",
+        help="Rotate artwork counterclockwise by DEGREES around its center before scaling and placement.",
     )
     parser.add_argument(
         "--pdf-page",
@@ -734,6 +809,7 @@ def main(argv: List[str] | None = None) -> int:
             alignment=args.alignment,
             pdf_page=args.pdf_page,
             force_hershey_text=args.hershey,
+            rotation_degrees=args.rotate,
         )
     except Exception as exc:  # pragma: no cover - CLI surface
         logger.error("Failed to slice artwork: %s", exc)

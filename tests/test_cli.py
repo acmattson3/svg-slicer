@@ -86,6 +86,14 @@ def test_argument_parser_supports_alignment() -> None:
     assert aligned_args.alignment == "center-right"
 
 
+def test_argument_parser_supports_rotation() -> None:
+    parser = cli.build_argument_parser()
+
+    args = parser.parse_args(["input.svg", "--rotate", "90"])
+
+    assert args.rotate == pytest.approx(90.0)
+
+
 def test_argument_parser_supports_pdf_page_and_hershey() -> None:
     parser = cli.build_argument_parser()
 
@@ -94,6 +102,25 @@ def test_argument_parser_supports_pdf_page_and_hershey() -> None:
     assert args.artwork == Path("input.pdf")
     assert args.pdf_page == 3
     assert args.hershey is True
+
+
+def test_rotate_shapes_rotates_geometry_and_centerline() -> None:
+    shape = ShapeGeometry(
+        geometry=Polygon([(0, 0), (4, 0), (4, 2), (0, 2)]),
+        brightness=0.0,
+        stroke_width=1.0,
+        color=(0, 0, 0),
+        centerline_geometry=LineString([(0, 1), (4, 1)]),
+    )
+
+    rotated = cli.rotate_shapes([shape], 90.0)
+
+    minx, miny, maxx, maxy = rotated[0].geometry.bounds
+    assert minx == pytest.approx(1.0)
+    assert miny == pytest.approx(-1.0)
+    assert maxx == pytest.approx(3.0)
+    assert maxy == pytest.approx(3.0)
+    assert list(rotated[0].centerline_geometry.coords) == pytest.approx([(2.0, -1.0), (2.0, 3.0)])
 
 
 def test_thin_feature_gets_infill_when_any_dimension_meets_min_fill_width(slicer_config) -> None:
@@ -327,6 +354,7 @@ def test_main_respects_color_mode_override(monkeypatch, slicer_config, tmp_path:
         alignment="center",
         pdf_page=1,
         force_hershey_text=False,
+        rotation_degrees=0.0,
     ):
         called["svg"] = svg
         called["output"] = output
@@ -335,6 +363,7 @@ def test_main_respects_color_mode_override(monkeypatch, slicer_config, tmp_path:
         called["alignment"] = alignment
         called["pdf_page"] = pdf_page
         called["force_hershey_text"] = force_hershey_text
+        called["rotation_degrees"] = rotation_degrees
 
     monkeypatch.setattr(cli, "load_config", fake_load_config)
     monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)
@@ -349,6 +378,7 @@ def test_main_respects_color_mode_override(monkeypatch, slicer_config, tmp_path:
     assert called["alignment"] == "center"
     assert called["pdf_page"] == 1
     assert called["force_hershey_text"] is False
+    assert called["rotation_degrees"] == pytest.approx(0.0)
 
 
 def test_main_passes_manual_scale_to_slice(monkeypatch, slicer_config, tmp_path: Path) -> None:
@@ -368,11 +398,13 @@ def test_main_passes_manual_scale_to_slice(monkeypatch, slicer_config, tmp_path:
         alignment="center",
         pdf_page=1,
         force_hershey_text=False,
+        rotation_degrees=0.0,
     ):
         called["scale_factor"] = scale_factor
         called["alignment"] = alignment
         called["pdf_page"] = pdf_page
         called["force_hershey_text"] = force_hershey_text
+        called["rotation_degrees"] = rotation_degrees
 
     monkeypatch.setattr(cli, "load_config", fake_load_config)
     monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)
@@ -384,6 +416,7 @@ def test_main_passes_manual_scale_to_slice(monkeypatch, slicer_config, tmp_path:
     assert code == 0
     assert called["scale_factor"] == pytest.approx(1.0)
     assert called["alignment"] == "center"
+    assert called["rotation_degrees"] == pytest.approx(0.0)
 
 
 def test_main_passes_pdf_page_and_hershey_to_slice(monkeypatch, slicer_config, tmp_path: Path) -> None:
@@ -403,9 +436,11 @@ def test_main_passes_pdf_page_and_hershey_to_slice(monkeypatch, slicer_config, t
         alignment="center",
         pdf_page=1,
         force_hershey_text=False,
+        rotation_degrees=0.0,
     ):
         called["pdf_page"] = pdf_page
         called["force_hershey_text"] = force_hershey_text
+        called["rotation_degrees"] = rotation_degrees
 
     monkeypatch.setattr(cli, "load_config", fake_load_config)
     monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)
@@ -413,10 +448,11 @@ def test_main_passes_pdf_page_and_hershey_to_slice(monkeypatch, slicer_config, t
     pdf_path = tmp_path / "input.pdf"
     pdf_path.write_bytes(b"%PDF-1.7\n")
 
-    code = cli.main([str(pdf_path), "--pdf-page", "4", "--hershey"])
+    code = cli.main([str(pdf_path), "--pdf-page", "4", "--hershey", "--rotate", "45"])
     assert code == 0
     assert called["pdf_page"] == 4
     assert called["force_hershey_text"] is True
+    assert called["rotation_degrees"] == pytest.approx(45.0)
 
 
 def test_main_fails_when_color_mode_enabled_without_palette(monkeypatch, slicer_config, tmp_path: Path) -> None:

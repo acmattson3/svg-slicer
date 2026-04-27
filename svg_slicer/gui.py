@@ -593,6 +593,7 @@ class BuildPlateView(QGraphicsView):
             y += grid_spacing
 
         self._info_item = self._scene.addText("Drop SVG or PDF files onto the build plate")
+        self._info_item.setTextWidth(max(rect.width() * 0.9, 1.0))
         self._info_item.setDefaultTextColor(QColor("#777777"))
         self._info_item.setZValue(5)
         self._update_info_position()
@@ -806,8 +807,10 @@ class BuildPlateView(QGraphicsView):
         if not self._info_item or not self._bed_item:
             return
         bed_rect = self._bed_item.rect()
+        self._info_item.setTextWidth(max(bed_rect.width() * 0.9, 1.0))
         text_rect = self._info_item.boundingRect()
-        x = bed_rect.x() + (bed_rect.width() - text_rect.width()) / 2.0
+        text_width = min(text_rect.width(), bed_rect.width())
+        x = bed_rect.x() + (bed_rect.width() - text_width) / 2.0
         y = bed_rect.y() + (bed_rect.height() - text_rect.height()) / 2.0
         self._info_item.setPos(x, y)
 
