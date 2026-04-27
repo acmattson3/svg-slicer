@@ -38,7 +38,9 @@ class PrinterConfig:
     y_max: float
     z_draw: float
     z_travel: float
+    z_raster_travel: float
     z_lift: float
+    glide_threshold: float
     feedrates: Feedrates
     start_gcode: List[str]
     end_gcode: List[str]
@@ -207,7 +209,9 @@ def _parse_printer_config(printer_raw: Dict[str, Any], fallback_name: str | None
         y_max=float(_require(offsets, "y_max")),
         z_draw=float(_require(z_heights, "draw")),
         z_travel=float(_require(z_heights, "travel")),
+        z_raster_travel=float(z_heights.get("raster_travel", z_heights.get("travel"))),
         z_lift=float(printer_raw.get("z_lift_height_mm", z_heights.get("travel", 5.0))),
+        glide_threshold=float(printer_raw.get("glide_threshold_mm", 0.8)),
         feedrates=feedrates,
         start_gcode=list(printer_raw.get("start_gcode", [])),
         end_gcode=list(printer_raw.get("end_gcode", [])),

@@ -39,6 +39,8 @@ from .svg_parser import (
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str], None]
+_WHITE_BRIGHTNESS_THRESHOLD = 0.98
+_WHITE_SATURATION_THRESHOLD = 0.12
 
 
 def _notify(progress_update: Optional[ProgressCallback], message: str) -> None:
@@ -69,6 +71,21 @@ def _brightness_to_density(brightness: float, config: SlicerConfig) -> float:
     # Map brightness (0=black, 1=white) into density range.
     dynamic_range = config.infill.max_density - config.infill.min_density
     return config.infill.min_density + (1.0 - brightness) * dynamic_range
+
+
+def _is_effectively_white_rgb(rgb: tuple[int, int, int] | None) -> bool:
+    if rgb is None:
+        return False
+    return (
+        _rgb_brightness(rgb) >= _WHITE_BRIGHTNESS_THRESHOLD
+        and _rgb_saturation(rgb) <= _WHITE_SATURATION_THRESHOLD
+    )
+
+
+def _is_effectively_white_shape(shape: ShapeGeometry) -> bool:
+    if _is_effectively_white_rgb(shape.color):
+        return True
+    return shape.brightness >= _WHITE_BRIGHTNESS_THRESHOLD
 
 
 def _geometry_to_polygons(geometry: BaseGeometry) -> List[Polygon]:
@@ -154,6 +171,7 @@ def rotate_shapes(shapes: Iterable[ShapeGeometry], degrees: float) -> List[Shape
                 stroke_width=shape.stroke_width,
                 color=shape.color,
                 centerline_geometry=centerline_geometry,
+                toolpath_tag=shape.toolpath_tag,
             )
         )
     return rotated
@@ -278,7 +296,7 @@ def _build_stroke_toolpaths(shape: ShapeGeometry, config: SlicerConfig) -> List[
     if centerlines:
         return toolpaths_from_polylines(
             centerlines,
-            tag="stroke",
+            tag=shape.toolpath_tag or "stroke",
             source_color=shape.color,
             brightness=shape.brightness,
         )
@@ -307,6 +325,9 @@ def _build_toolpaths(
     if min_fill_mode not in {"min", "max"}:
         min_fill_mode = "min"
     for index, shape in enumerate(shape_list, start=1):
+        if _is_effectively_white_shape(shape):
+            logger.debug("Skipping effectively white shape.")
+            continue
         if shape.stroke_width is not None:
             _notify(
                 progress_update,
@@ -549,6 +570,8 @@ def _plan_color_sequence(toolpaths: List[Toolpath], config: SlicerConfig) -> Col
             grayscale_palette,
             palette_brightness,
         )
+        if _is_effectively_white_rgb(palette_rgb[best_color]):
+            continue
         toolpath.assigned_color = best_color
         color_groups.setdefault(best_color, []).append(toolpath)
         usage[best_color] = usage.get(best_color, 0.0) + _toolpath_length(toolpath)
@@ -597,6 +620,8 @@ def write_toolpaths_to_gcode(
                 pause_commands = config.printer.pause_gcode or ["M600"]
                 for command in pause_commands:
                     generator.emit_command(command)
+    elif config.printer.color_mode:
+        generator.emit_comment("No non-white toolpaths after palette assignment.")
     else:
         generator.draw_toolpaths(toolpath_list, config.printer.feedrates)
 
@@ -653,6 +678,18 @@ def _parse_rotation_argument(value: str) -> float:
     if not math.isfinite(rotation):
         raise argparse.ArgumentTypeError("rotation must be finite")
     return rotation
+
+
+def _parse_positive_float_argument(name: str, value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{name} must be a number") from exc
+    if not math.isfinite(number):
+        raise argparse.ArgumentTypeError(f"{name} must be finite")
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"{name} must be greater than zero")
+    return number
 
 
 def slice_svg_to_gcode(
@@ -747,6 +784,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Rotate artwork counterclockwise by DEGREES around its center before scaling and placement.",
     )
     parser.add_argument(
+        "--raster-spacing",
+        type=lambda value: _parse_positive_float_argument("raster spacing", value),
+        default=None,
+        metavar="MM",
+        help=(
+            "Override the raster scanline gap in millimeters for embedded images. "
+            "Smaller values preserve more detail but generate more toolpaths."
+        ),
+    )
+    parser.add_argument(
         "--pdf-page",
         type=int,
         default=1,
@@ -789,6 +836,10 @@ def main(argv: List[str] | None = None) -> int:
             "Color mode override: %s",
             "enabled" if config.printer.color_mode else "disabled",
         )
+
+    if args.raster_spacing is not None:
+        config.sampling.raster_sample_spacing = float(args.raster_spacing)
+        logger.info("Raster spacing override: %.3f mm", config.sampling.raster_sample_spacing)
 
     if config.printer.color_mode and not config.printer.available_colors:
         logger.error(

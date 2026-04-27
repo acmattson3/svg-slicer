@@ -44,6 +44,7 @@ Edit `config.yaml` to match your machine. Printer settings can be grouped into n
 - `printers.<profile>.bed_size_mm.width|depth`: overall bed dimensions.
 - `printers.<profile>.origin_offsets_mm.x_min|x_max|y_min|y_max`: usable XY window inside the physical bed.
 - `printers.<profile>.z_heights_mm.draw|travel|raster_travel`: Z heights for pen-down, normal pen-up, and raster pen-up moves; `raster_travel` defaults to `travel` when omitted and `z_lift_height_mm` optionally overrides lift distance.
+- `printers.<profile>.glide_threshold_mm`: maximum gap that can be bridged with the pen left down between consecutive toolpaths. Use `0` to disable gliding entirely.
 - `printers.<profile>.draw_command` / `lift_command`: optional pen-down and pen-up G-code commands. When set, these commands are emitted instead of the matching Z move.
 - `printers.<profile>.draw_move_command` / `travel_move_command`: optional XY movement command words for pen-down and pen-up moves. Defaults are `G1` for drawing and `G0` for travel.
 - `printers.<profile>.plot_mode`: optional stroke handling mode. Use `trace` for the default stroke-outline behavior, `centerline` to draw SVG strokes as single paths, or `auto` to centerline strokes no wider than the configured pen width.
@@ -117,6 +118,7 @@ Common flags:
 - `--hershey` renders imported text as Hershey single-line strokes. PDF text always uses this path.
 - `--scale auto` fits artwork to the printable area (default). Use `--scale none`, `--scale 1`, or another positive factor such as `--scale 0.5` to choose the artwork scale manually.
 - `--rotate <degrees>` rotates artwork counterclockwise around its center before scaling and placement.
+- `--raster-spacing <mm>` overrides the gap between raster scanlines for embedded images. The default comes from `sampling.raster_sample_spacing_mm`.
 - `--alignment <position>` places artwork inside the printable area. The default is `center`. Supported values are `top-left`, `top-middle`, `top-right`, `center-left`, `center`, `center-right`, `bottom-left`, `bottom-middle`, and `bottom-right`.
 - `--color-mode` or `--bw-mode` override the profile default for a single run.
 - `--log-level` adjusts verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`).

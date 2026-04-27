@@ -8,6 +8,7 @@ from shapely.geometry import LineString, Polygon
 from svg_slicer.config import PrinterConfig
 from svg_slicer.svg_parser import (
     ShapeGeometry,
+    _hershey_lines_for_text,
     _raster_pil_image_to_shape_geometries,
     fit_shapes_to_bed,
     parse_svg,
@@ -126,6 +127,15 @@ def test_parse_svg_hershey_text_produces_centerline_strokes(tmp_path: Path, slic
     assert shapes
     assert all(isinstance(shape.geometry, LineString) for shape in shapes)
     assert all(shape.stroke_width is not None for shape in shapes)
+
+
+def test_hershey_lines_merge_connected_segments() -> None:
+    pytest.importorskip("HersheyFonts")
+
+    lines = _hershey_lines_for_text("O", x_base=0.0, y_base=0.0, font_size=12.0)
+
+    assert lines
+    assert any(len(list(line.coords)) > 2 for line in lines)
 
 
 def test_parse_svg_missing_font_falls_back_to_hershey(tmp_path: Path, slicer_config) -> None:

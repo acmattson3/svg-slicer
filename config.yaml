@@ -13,7 +13,9 @@ printers:
     z_heights_mm:
       draw: 0.0
       travel: 1.5
+      raster_travel: 1.5
     z_lift_height_mm: 1.5
+    glide_threshold_mm: 0.8
     feedrates_mm_s:
       draw: 175.0
       travel: 175.0
@@ -60,7 +62,9 @@ printers:
     z_heights_mm:
       draw: 2.5
       travel: 4.5
+      raster_travel: 4.5
     z_lift_height_mm: 2.0
+    glide_threshold_mm: 0.8
     feedrates_mm_s:
       draw: 400.0
       travel: 400.0
@@ -94,7 +98,9 @@ printers:
     z_heights_mm:
       draw: 0.0
       travel: 0.0
+      raster_travel: 0.0
     z_lift_height_mm: 0.0
+    glide_threshold_mm: 0.8
     feedrates_mm_s:
       draw: 100.0
       travel: 100.0
@@ -131,5 +137,7 @@ sampling:
   segment_length_tolerance_mm: 1.5
   outline_simplify_tolerance_mm: 0.3
   curve_detail_scale: 0.5
+  raster_sample_spacing_mm: 2.0
+  raster_max_cells: 4000
 rendering:
   preview_line_width_mm: 0.45

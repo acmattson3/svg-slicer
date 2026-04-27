@@ -45,6 +45,18 @@ def test_generate_toolpaths_for_shapes_without_fit_returns_scale_1(slicer_config
     assert scale == 1.0
 
 
+def test_generate_toolpaths_skips_effectively_white_shapes_in_bw_mode(slicer_config) -> None:
+    shape = ShapeGeometry(
+        geometry=Polygon([(0, 0), (20, 0), (20, 20), (0, 20)]),
+        brightness=1.0,
+        stroke_width=None,
+        color=(255, 255, 255),
+    )
+
+    with pytest.raises(RuntimeError, match="No toolpaths were generated"):
+        cli.generate_toolpaths_for_shapes([shape], slicer_config, fit_to_bed=False)
+
+
 def test_parse_scale_argument_accepts_auto_none_factor_and_percent() -> None:
     assert cli._parse_scale_argument("auto") is None
     assert cli._parse_scale_argument("none") == pytest.approx(1.0)
@@ -102,6 +114,14 @@ def test_argument_parser_supports_pdf_page_and_hershey() -> None:
     assert args.artwork == Path("input.pdf")
     assert args.pdf_page == 3
     assert args.hershey is True
+
+
+def test_argument_parser_supports_raster_spacing() -> None:
+    parser = cli.build_argument_parser()
+
+    args = parser.parse_args(["input.pdf", "--raster-spacing", "0.75"])
+
+    assert args.raster_spacing == pytest.approx(0.75)
 
 
 def test_rotate_shapes_rotates_geometry_and_centerline() -> None:
@@ -306,6 +326,20 @@ def test_plan_color_sequence_orders_by_least_usage(color_config_path: Path) -> N
     assert plan.ordered_colors[1] == "#FF0000"
 
 
+def test_plan_color_sequence_skips_white_assigned_color(color_config_path: Path) -> None:
+    config = cli.load_config(color_config_path)
+    config.printer.available_colors = ["#FFFFFF", "#000000"]
+
+    white = Toolpath(points=((0, 0), (1, 0)), source_color=(252, 252, 252))
+    black = Toolpath(points=((0, 0), (2, 0)), source_color=(0, 0, 0))
+    plan = cli._plan_color_sequence([white, black], config)
+
+    assert plan is not None
+    assert plan.ordered_colors == ["#000000"]
+    assert white.assigned_color is None
+    assert black.assigned_color == "#000000"
+
+
 def test_write_toolpaths_to_gcode_color_mode_inserts_pause(tmp_path: Path, color_config_path: Path) -> None:
     config = cli.load_config(color_config_path)
     toolpaths = [
@@ -322,6 +356,37 @@ def test_write_toolpaths_to_gcode_color_mode_inserts_pause(tmp_path: Path, color
     assert "M600" in text
     assert result.line_count > 0
     assert len(result.color_order) == 2
+
+
+def test_write_toolpaths_to_gcode_color_mode_omits_white_paths(tmp_path: Path, color_config_path: Path) -> None:
+    config = cli.load_config(color_config_path)
+    config.printer.available_colors = ["#FFFFFF", "#000000"]
+    toolpaths = [
+        Toolpath(points=((0, 0), (5, 0)), source_color=(255, 255, 255)),
+        Toolpath(points=((0, 0), (6, 0)), source_color=(0, 0, 0)),
+    ]
+    output = tmp_path / "white_omitted.gcode"
+
+    result = cli.write_toolpaths_to_gcode(toolpaths, output, config)
+
+    text = output.read_text(encoding="utf-8")
+    assert "#FFFFFF" not in result.color_order
+    assert result.color_order == ["#000000"]
+    assert "COLOR 1/1: #000000" in text
+
+
+def test_write_toolpaths_to_gcode_color_mode_skips_all_white_output(tmp_path: Path, color_config_path: Path) -> None:
+    config = cli.load_config(color_config_path)
+    config.printer.available_colors = ["#FFFFFF", "#000000"]
+    toolpaths = [Toolpath(points=((0, 0), (5, 0)), source_color=(255, 255, 255))]
+    output = tmp_path / "all_white.gcode"
+
+    result = cli.write_toolpaths_to_gcode(toolpaths, output, config)
+
+    text = output.read_text(encoding="utf-8")
+    assert result.color_order == []
+    assert "No non-white toolpaths after palette assignment." in text
+    assert "X5.000" not in text
 
 
 def test_write_toolpaths_to_gcode_bw_mode_no_color_comments(tmp_path: Path, config_path: Path) -> None:
@@ -453,6 +518,39 @@ def test_main_passes_pdf_page_and_hershey_to_slice(monkeypatch, slicer_config, t
     assert called["pdf_page"] == 4
     assert called["force_hershey_text"] is True
     assert called["rotation_degrees"] == pytest.approx(45.0)
+
+
+def test_main_passes_raster_spacing_override(monkeypatch, slicer_config, tmp_path: Path) -> None:
+    called = {}
+
+    def fake_load_config(path, profile=None):
+        slicer_config.sampling.raster_sample_spacing = 2.0
+        return slicer_config
+
+    def fake_slice(
+        svg,
+        output,
+        config,
+        preview,
+        preview_file,
+        *,
+        scale_factor=None,
+        alignment="center",
+        pdf_page=1,
+        force_hershey_text=False,
+        rotation_degrees=0.0,
+    ):
+        called["raster_spacing"] = config.sampling.raster_sample_spacing
+
+    monkeypatch.setattr(cli, "load_config", fake_load_config)
+    monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)
+
+    pdf_path = tmp_path / "input.pdf"
+    pdf_path.write_bytes(b"%PDF-1.7\n")
+
+    code = cli.main([str(pdf_path), "--raster-spacing", "0.6"])
+    assert code == 0
+    assert called["raster_spacing"] == pytest.approx(0.6)
 
 
 def test_main_fails_when_color_mode_enabled_without_palette(monkeypatch, slicer_config, tmp_path: Path) -> None:

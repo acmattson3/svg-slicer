@@ -168,7 +168,7 @@ class LoadedModel:
         translate_y = offset_y + (self.position[1] if include_position else 0.0)
 
         transformed: List[ShapeGeometry] = []
-        for geom, brightness, stroke_width, color, centerline_geometry in staged or []:
+        for geom, brightness, stroke_width, color, centerline_geometry, toolpath_tag in staged or []:
             if translate_x != 0.0 or translate_y != 0.0:
                 geom = shapely_translate(geom, xoff=translate_x, yoff=translate_y)
                 if centerline_geometry is not None:
@@ -184,6 +184,7 @@ class LoadedModel:
                     stroke_width=stroke_width,
                     color=color,
                     centerline_geometry=centerline_geometry,
+                    toolpath_tag=toolpath_tag,
                 )
             )
 
@@ -201,10 +202,10 @@ class LoadedModel:
         rotation: float,
         capture_shapes: bool,
     ) -> Tuple[
-        Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]], Optional[Any]]]],
+        Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]], Optional[Any], Optional[str]]]],
         Tuple[float, float, float, float],
     ]:
-        staged: Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]], Optional[Any]]]] = (
+        staged: Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]], Optional[Any], Optional[str]]]] = (
             [] if capture_shapes else None
         )
 
@@ -252,6 +253,7 @@ class LoadedModel:
                         None if shape.stroke_width is None else shape.stroke_width * scale,
                         shape.color,
                         centerline_geometry,
+                        shape.toolpath_tag,
                     )
                 )
 
@@ -1270,13 +1272,19 @@ class SettingsTab(QWidget):
 
         self.z_draw_spin = self._make_spin(-50.0, 200.0, 0.1)
         self.z_travel_spin = self._make_spin(-50.0, 200.0, 0.1)
+        self.z_raster_travel_spin = self._make_spin(-50.0, 200.0, 0.1)
         self.z_lift_spin = self._make_spin(-50.0, 200.0, 0.1)
+        self.glide_threshold_spin = self._make_spin(0.0, 50.0, 0.05, decimals=3)
         self._set_wide(self.z_draw_spin)
         self._set_wide(self.z_travel_spin)
+        self._set_wide(self.z_raster_travel_spin)
         self._set_wide(self.z_lift_spin)
+        self._set_wide(self.glide_threshold_spin)
         printer_form.addRow("Z draw (mm)", self.z_draw_spin)
         printer_form.addRow("Z travel (mm)", self.z_travel_spin)
+        printer_form.addRow("Z raster travel (mm)", self.z_raster_travel_spin)
         printer_form.addRow("Z lift (mm)", self.z_lift_spin)
+        printer_form.addRow("Glide threshold (mm)", self.glide_threshold_spin)
 
         self.draw_command_edit = QLineEdit()
         self.draw_command_edit.setPlaceholderText("Optional, e.g. M03")
@@ -1385,6 +1393,7 @@ class SettingsTab(QWidget):
         self.segment_tolerance_spin = self._make_spin(0.001, 10.0, 0.01, decimals=4)
         self.outline_tolerance_spin = self._make_spin(0.001, 10.0, 0.01, decimals=4)
         self.curve_detail_scale_spin = self._make_spin(0.1, 20.0, 0.1, decimals=2)
+        self.raster_spacing_spin = self._make_spin(0.01, 50.0, 0.01, decimals=3)
         self.plot_mode_combo = QComboBox()
         self.plot_mode_combo.addItem("Trace stroke outlines", "trace")
         self.plot_mode_combo.addItem("Centerline all strokes", "centerline")
@@ -1392,11 +1401,13 @@ class SettingsTab(QWidget):
         self._set_wide(self.segment_tolerance_spin)
         self._set_wide(self.outline_tolerance_spin)
         self._set_wide(self.curve_detail_scale_spin)
+        self._set_wide(self.raster_spacing_spin)
         self._set_wide(self.plot_mode_combo)
 
         sampling_form.addRow("Segment tolerance (mm)", self.segment_tolerance_spin)
         sampling_form.addRow("Outline simplify (mm)", self.outline_tolerance_spin)
         sampling_form.addRow("Curve detail scale", self.curve_detail_scale_spin)
+        sampling_form.addRow("Raster spacing (mm)", self.raster_spacing_spin)
         sampling_form.addRow("Plot mode", self.plot_mode_combo)
 
         layout.addWidget(sampling_group)
@@ -1471,7 +1482,9 @@ class SettingsTab(QWidget):
         self.y_max_spin.setValue(printer.y_max)
         self.z_draw_spin.setValue(printer.z_draw)
         self.z_travel_spin.setValue(printer.z_travel)
+        self.z_raster_travel_spin.setValue(printer.z_raster_travel)
         self.z_lift_spin.setValue(printer.z_lift)
+        self.glide_threshold_spin.setValue(printer.glide_threshold)
         self.draw_command_edit.setText(printer.draw_command or "")
         self.lift_command_edit.setText(printer.lift_command or "")
         self.draw_move_command_edit.setText(printer.draw_move_command or "")
@@ -1502,6 +1515,7 @@ class SettingsTab(QWidget):
         self.segment_tolerance_spin.setValue(sampling.segment_tolerance)
         self.outline_tolerance_spin.setValue(sampling.outline_simplify_tolerance)
         self.curve_detail_scale_spin.setValue(sampling.curve_detail_scale)
+        self.raster_spacing_spin.setValue(sampling.raster_sample_spacing)
         mode_index = self.plot_mode_combo.findData(sampling.plot_mode)
         self.plot_mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
 
@@ -1533,7 +1547,9 @@ class SettingsTab(QWidget):
             y_max=self.y_max_spin.value(),
             z_draw=self.z_draw_spin.value(),
             z_travel=self.z_travel_spin.value(),
+            z_raster_travel=self.z_raster_travel_spin.value(),
             z_lift=self.z_lift_spin.value(),
+            glide_threshold=self.glide_threshold_spin.value(),
             feedrates=Feedrates(
                 draw_mm_s=self.feedrate_draw_spin.value(),
                 travel_mm_s=self.feedrate_travel_spin.value(),
@@ -1573,6 +1589,8 @@ class SettingsTab(QWidget):
             segment_tolerance=self.segment_tolerance_spin.value(),
             outline_simplify_tolerance=self.outline_tolerance_spin.value(),
             curve_detail_scale=self.curve_detail_scale_spin.value(),
+            raster_sample_spacing=self.raster_spacing_spin.value(),
+            raster_max_cells=self._config.sampling.raster_max_cells,
             plot_mode=str(self.plot_mode_combo.currentData() or "trace"),
             plot_stroke_width_threshold=self.perimeter_thickness_spin.value(),
         )
@@ -1836,6 +1854,7 @@ class MainWindow(QMainWindow):
                 stroke_width=shape.stroke_width,
                 color=shape.color,
                 centerline_geometry=shape.centerline_geometry,
+                toolpath_tag=shape.toolpath_tag,
             )
             for shape in shapes
         ]
@@ -2000,6 +2019,7 @@ class MainWindow(QMainWindow):
                     stroke_width=shape.stroke_width,
                     color=shape.color,
                     centerline_geometry=shape.centerline_geometry,
+                    toolpath_tag=shape.toolpath_tag,
                 )
                 for shape in shapes
             ]
@@ -2031,6 +2051,7 @@ class MainWindow(QMainWindow):
                     stroke_width=shape.stroke_width,
                     color=shape.color,
                     centerline_geometry=centerline_geometry,
+                    toolpath_tag=shape.toolpath_tag,
                 )
             )
         return normalized_shapes, width, height
@@ -2802,8 +2823,10 @@ class MainWindow(QMainWindow):
             "z_heights_mm": {
                 "draw": config.printer.z_draw,
                 "travel": config.printer.z_travel,
+                "raster_travel": config.printer.z_raster_travel,
             },
             "z_lift_height_mm": config.printer.z_lift,
+            "glide_threshold_mm": config.printer.glide_threshold,
             "feedrates_mm_s": {
                 "draw": config.printer.feedrates.draw_mm_s,
                 "travel": config.printer.feedrates.travel_mm_s,
@@ -2844,6 +2867,8 @@ class MainWindow(QMainWindow):
                 "segment_length_tolerance_mm": config.sampling.segment_tolerance,
                 "outline_simplify_tolerance_mm": config.sampling.outline_simplify_tolerance,
                 "curve_detail_scale": config.sampling.curve_detail_scale,
+                "raster_sample_spacing_mm": config.sampling.raster_sample_spacing,
+                "raster_max_cells": config.sampling.raster_max_cells,
                 "plot_mode": config.sampling.plot_mode,
             },
             "rendering": {

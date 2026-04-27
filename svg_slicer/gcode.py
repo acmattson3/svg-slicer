@@ -130,7 +130,7 @@ class GcodeGenerator:
         travel_feed = feedrates.travel_feedrate
         z_feed = feedrates.z_feedrate
         draw_height = self.printer.z_draw
-        travel_height = self.printer.z_travel
+        travel_height = self.printer.z_raster_travel if toolpath.tag == "raster" else self.printer.z_travel
 
         start = points[0]
         self._set_pen_state(False, travel_height, z_feed)
@@ -141,8 +141,44 @@ class GcodeGenerator:
         self._set_pen_state(False, travel_height, z_feed)
 
     def draw_toolpaths(self, toolpaths: Iterable[Toolpath], feedrates: Feedrates) -> None:
-        for toolpath in toolpaths:
-            self.draw_single_toolpath(toolpath, feedrates)
+        path_list = [toolpath for toolpath in toolpaths if len(toolpath.points) >= 2]
+        if not path_list:
+            return
+
+        draw_feed = feedrates.draw_feedrate
+        travel_feed = feedrates.travel_feedrate
+        z_feed = feedrates.z_feedrate
+        glide_threshold = max(0.0, float(self.printer.glide_threshold))
+
+        for index, toolpath in enumerate(path_list):
+            points = list(toolpath.points)
+            draw_height = self.printer.z_draw
+            travel_height = self.printer.z_raster_travel if toolpath.tag == "raster" else self.printer.z_travel
+            start = points[0]
+
+            if self._pen_is_down and self._position == start and abs(self._z_height - draw_height) < 1e-6:
+                pass
+            else:
+                self._set_pen_state(False, travel_height, z_feed)
+                self._rapid_move(start, travel_feed)
+                self._set_pen_state(True, draw_height, z_feed)
+
+            for point in points[1:]:
+                self._linear_move(point, draw_feed)
+
+            next_toolpath = path_list[index + 1] if index + 1 < len(path_list) else None
+            if next_toolpath is None:
+                self._set_pen_state(False, travel_height, z_feed)
+                continue
+
+            next_points = list(next_toolpath.points)
+            next_start = next_points[0]
+            gap = _distance(points[-1], next_start)
+            if glide_threshold > 0 and gap <= glide_threshold:
+                self._linear_move(next_start, draw_feed)
+                continue
+
+            self._set_pen_state(False, travel_height, z_feed)
 
     def generate(self) -> List[str]:
         return self._gcode

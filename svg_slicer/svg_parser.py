@@ -395,6 +395,37 @@ def _fit_lines_to_bounds(
     return fitted
 
 
+def _merge_connected_ordered_lines(lines: List[LineString], *, tolerance: float = 1e-9) -> List[LineString]:
+    merged: List[LineString] = []
+    current_points: List[Tuple[float, float]] = []
+
+    def flush_current() -> None:
+        nonlocal current_points
+        if len(current_points) >= 2:
+            merged.append(LineString(current_points))
+        current_points = []
+
+    for line in lines:
+        if line.is_empty or line.length <= 0:
+            continue
+        coords = [(float(x), float(y)) for x, y in line.coords]
+        if len(coords) < 2:
+            continue
+        if not current_points:
+            current_points = coords[:]
+            continue
+        last_x, last_y = current_points[-1]
+        next_x, next_y = coords[0]
+        if math.hypot(last_x - next_x, last_y - next_y) <= tolerance:
+            current_points.extend(coords[1:])
+            continue
+        flush_current()
+        current_points = coords[:]
+
+    flush_current()
+    return merged
+
+
 def _normalize_hershey_text(text_content: str) -> str:
     return _WHITESPACE_RE.sub(" ", text_content).strip()
 
@@ -547,7 +578,7 @@ def _hershey_lines_for_text(
             line = shapely_affine_transform(line, _matrix_to_affine_params(matrix))
         if not line.is_empty and line.length > 0:
             lines.append(line)
-    return lines
+    return _merge_connected_ordered_lines(lines)
 
 
 def _text_to_hershey_lines(element: Text) -> List[LineString]:
