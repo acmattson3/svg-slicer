@@ -25,6 +25,7 @@ try:
         QGraphicsView,
         QGroupBox,
         QHBoxLayout,
+        QInputDialog,
         QLabel,
         QLineEdit,
         QListWidget,
@@ -55,6 +56,7 @@ except ImportError as exc:  # pragma: no cover - GUI dependencies are optional f
 from shapely.affinity import rotate as shapely_rotate, scale as shapely_scale, translate as shapely_translate
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Polygon
 
+from .artwork_parser import parse_artwork
 from .cli import generate_toolpaths_for_shapes, write_toolpaths_to_gcode
 from .config import (
     Feedrates,
@@ -107,6 +109,8 @@ def _configure_qt_platform() -> None:
 class LoadedModel:
     path: Path
     original_shapes: List[ShapeGeometry]
+    pdf_page: int = 1
+    force_hershey_text: bool = False
     normalized_shapes: List[ShapeGeometry] = field(default_factory=list)
     width: float = 0.0
     height: float = 0.0
@@ -364,7 +368,7 @@ def build_model_path(shapes: Sequence[ShapeGeometry]) -> QPainterPath:
 
 
 class ModelGraphicsItem(QGraphicsPathItem):
-    """Graphics item representing an SVG model positioned on the build plate."""
+    """Graphics item representing an artwork model positioned on the build plate."""
 
     def __init__(
         self,
@@ -514,7 +518,7 @@ class GuiLogHandler(logging.Handler):
 
 
 class BuildPlateView(QGraphicsView):
-    """Interactive view representing the printer bed with draggable SVG models."""
+    """Interactive view representing the printer bed with draggable artwork models."""
 
     svgDropped = Signal(list)
     arrangementChanged = Signal()
@@ -588,7 +592,7 @@ class BuildPlateView(QGraphicsView):
             line.setZValue(-3)
             y += grid_spacing
 
-        self._info_item = self._scene.addText("Drop SVG files onto the build plate")
+        self._info_item = self._scene.addText("Drop SVG or PDF files onto the build plate")
         self._info_item.setDefaultTextColor(QColor("#777777"))
         self._info_item.setZValue(5)
         self._update_info_position()
@@ -671,7 +675,10 @@ class BuildPlateView(QGraphicsView):
         mime = event.mimeData()
         if not mime.hasUrls():
             return False
-        return any(url.isLocalFile() and url.toLocalFile().lower().endswith(".svg") for url in mime.urls())
+        return any(
+            url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in {".svg", ".pdf"}
+            for url in mime.urls()
+        )
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         if self._accepts_mime(event):
@@ -692,7 +699,7 @@ class BuildPlateView(QGraphicsView):
         paths = [
             url.toLocalFile()
             for url in event.mimeData().urls()
-            if url.isLocalFile() and url.toLocalFile().lower().endswith(".svg")
+            if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in {".svg", ".pdf"}
         ]
         if paths:
             self.svgDropped.emit(paths)
@@ -864,7 +871,7 @@ class PrepareTab(QWidget):
         self.file_list.setSelectionMode(QListWidget.ExtendedSelection)
         self.file_list.setMinimumWidth(220)
 
-        self.add_button = QPushButton("Add SVGs…")
+        self.add_button = QPushButton("Add Artwork…")
         self.remove_button = QPushButton("Remove Selected")
         self.clear_button = QPushButton("Clear All")
         self.slice_button = QPushButton("Slice")
@@ -878,8 +885,13 @@ class PrepareTab(QWidget):
         controls.addWidget(self.printer_label)
         controls.addWidget(self.scale_label)
         controls.addSpacing(8)
-        controls.addWidget(QLabel("Queued SVGs:"))
+        controls.addWidget(QLabel("Queued artwork:"))
         controls.addWidget(self.file_list)
+
+        self.hershey_checkbox = QCheckBox("Use Hershey text strokes")
+        self.hershey_checkbox.setToolTip(
+            "Render imported text as single-line Hershey strokes. PDF text always uses this path."
+        )
 
         self.file_list.itemSelectionChanged.connect(self._on_list_selection_changed)
 
@@ -957,6 +969,7 @@ class PrepareTab(QWidget):
         button_row.addWidget(self.add_button)
         button_row.addWidget(self.remove_button)
         controls.addLayout(button_row)
+        controls.addWidget(self.hershey_checkbox)
         controls.addWidget(self.clear_button)
         controls.addSpacing(12)
 
@@ -1012,7 +1025,10 @@ class PrepareTab(QWidget):
     def refresh_models(self, models: Sequence[LoadedModel], selected_index: Optional[int] = None) -> None:
         self.file_list.clear()
         for model in models:
-            item = QListWidgetItem(model.path.name)
+            label = model.path.name
+            if model.path.suffix.lower() == ".pdf":
+                label = f"{model.path.name} (page {model.pdf_page})"
+            item = QListWidgetItem(label)
             item.setData(Qt.UserRole, str(model.path))
             item.setToolTip(str(model.path))
             self.file_list.addItem(item)
@@ -1186,6 +1202,9 @@ class PrepareTab(QWidget):
         if text:
             return Path(text)
         return Path("output.gcode")
+
+    def hershey_text_enabled(self) -> bool:
+        return self.hershey_checkbox.isChecked()
 
 
 class SettingsTab(QWidget):
@@ -1695,7 +1714,7 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        add_svgs_action = file_menu.addAction("Add SVGs…")
+        add_svgs_action = file_menu.addAction("Add Artwork…")
         add_svgs_action.setShortcut(QKeySequence("Ctrl+I"))
         add_svgs_action.triggered.connect(self._prompt_add_files)
 
@@ -1784,6 +1803,8 @@ class MainWindow(QMainWindow):
                     "initial_scale": float(model.initial_scale),
                     "rotation_degrees": float(model.rotation_degrees),
                     "position": [float(model.position[0]), float(model.position[1])],
+                    "pdf_page": int(model.pdf_page),
+                    "force_hershey_text": bool(model.force_hershey_text),
                 }
             )
         return {
@@ -1859,7 +1880,14 @@ class MainWindow(QMainWindow):
                 self._append_log(f"[WARNING] Skipping missing layout file: {path}")
                 continue
             try:
-                shapes = parse_svg(str(path), self.config.sampling)
+                pdf_page = int(record.get("pdf_page", 1) or 1)
+                force_hershey_text = bool(record.get("force_hershey_text", False))
+                shapes = parse_artwork(
+                    path,
+                    self.config.sampling,
+                    pdf_page=pdf_page,
+                    force_hershey_text=force_hershey_text,
+                )
             except Exception as exc:
                 self._append_log(f"[WARNING] Failed to load {path.name} from layout: {exc}")
                 continue
@@ -1884,6 +1912,8 @@ class MainWindow(QMainWindow):
             model = LoadedModel(
                 path=path,
                 original_shapes=shapes,
+                pdf_page=pdf_page,
+                force_hershey_text=force_hershey_text,
                 scale=scale,
                 initial_scale=initial_scale,
                 rotation_degrees=rotation,
@@ -2084,9 +2114,14 @@ class MainWindow(QMainWindow):
         total_models = len(self.models)
         for idx, model in enumerate(self.models):
             if progress_update:
-                progress_update(f"Reloading SVG geometry ({idx + 1}/{total_models})…")
+                progress_update(f"Reloading artwork geometry ({idx + 1}/{total_models})…")
             try:
-                model.original_shapes = parse_svg(str(model.path), self.config.sampling)
+                model.original_shapes = parse_artwork(
+                    model.path,
+                    self.config.sampling,
+                    pdf_page=model.pdf_page,
+                    force_hershey_text=model.force_hershey_text,
+                )
             except Exception as exc:
                 self._append_log(
                     f"[WARNING] Could not reload geometry for {model.path.name} with updated sampling: {exc}"
@@ -2207,6 +2242,8 @@ class MainWindow(QMainWindow):
             clone = LoadedModel(
                 path=source_model.path,
                 original_shapes=self._shape_list_copy(source_model.original_shapes),
+                pdf_page=source_model.pdf_page,
+                force_hershey_text=source_model.force_hershey_text,
                 scale=source_model.scale,
                 initial_scale=source_model.initial_scale,
                 rotation_degrees=source_model.rotation_degrees,
@@ -2359,12 +2396,35 @@ class MainWindow(QMainWindow):
     def _prompt_add_files(self) -> None:
         filenames, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select SVG files",
+            "Select artwork files",
             str(Path.cwd()),
-            "SVG Files (*.svg);;All Files (*)",
+            "Artwork Files (*.svg *.pdf);;SVG Files (*.svg);;PDF Files (*.pdf);;All Files (*)",
         )
         if filenames:
             self._handle_files_added(filenames)
+
+    def _select_pdf_page(self, path: Path) -> Optional[int]:
+        try:
+            import fitz
+
+            doc = fitz.open(str(path))
+            page_count = doc.page_count
+            doc.close()
+        except Exception as exc:
+            self._append_log(f"[ERROR] Could not inspect {path.name}: {exc}")
+            return None
+        if page_count <= 1:
+            return 1
+        page, ok = QInputDialog.getInt(
+            self,
+            "Select PDF Page",
+            f"Page to import from {path.name}:",
+            1,
+            1,
+            page_count,
+            1,
+        )
+        return int(page) if ok else None
 
     def _prompt_output_path(self) -> None:
         output_path, _ = QFileDialog.getSaveFileName(
@@ -2454,11 +2514,11 @@ class MainWindow(QMainWindow):
 
     def _handle_files_added(self, filenames: Iterable[str]) -> None:
         if not self.config:
-            QMessageBox.warning(self, "Configuration Missing", "Load a configuration before adding SVG files.")
+            QMessageBox.warning(self, "Configuration Missing", "Load a configuration before adding artwork files.")
             return
         undo_snapshot = self._capture_layout_state()
         progress = QProgressDialog("Preparing import…", None, 0, 0, self)
-        progress.setWindowTitle("Importing SVGs")
+        progress.setWindowTitle("Importing Artwork")
         progress.setCancelButton(None)
         progress.setWindowModality(Qt.ApplicationModal)
         progress.show()
@@ -2478,13 +2538,33 @@ class MainWindow(QMainWindow):
                 if not path.exists():
                     self._append_log(f"[WARNING] File not found: {path}")
                     continue
+                if path.suffix.lower() not in {".svg", ".pdf"}:
+                    self._append_log(f"[WARNING] Unsupported artwork file type: {path}")
+                    continue
+                pdf_page = 1
+                if path.suffix.lower() == ".pdf":
+                    selected_page = self._select_pdf_page(path)
+                    if selected_page is None:
+                        continue
+                    pdf_page = selected_page
+                force_hershey_text = self.prepare_tab.hershey_text_enabled()
                 try:
                     update_progress(f"Parsing {path.name} geometry…")
-                    shapes = parse_svg(str(path), self.config.sampling)
+                    shapes = parse_artwork(
+                        path,
+                        self.config.sampling,
+                        pdf_page=pdf_page,
+                        force_hershey_text=force_hershey_text,
+                    )
                 except Exception as exc:
                     self._append_log(f"[ERROR] Failed to parse {path.name}: {exc}")
                     continue
-                model = LoadedModel(path=path, original_shapes=shapes)
+                model = LoadedModel(
+                    path=path,
+                    original_shapes=shapes,
+                    pdf_page=pdf_page,
+                    force_hershey_text=force_hershey_text,
+                )
                 index = len(self.models)
                 update_progress(f"Configuring {path.name} for printer…")
                 if not undo_recorded:
@@ -2508,7 +2588,7 @@ class MainWindow(QMainWindow):
             self._rebuild_model_views()
             self._invalidate_toolpaths("Placement updated; slice to generate G-code.")
         else:
-            self.prepare_tab.set_status("No new SVGs were added.")
+            self.prepare_tab.set_status("No new artwork files were added.")
 
     def _remove_selected_models(self) -> None:
         indices = sorted(self.prepare_tab.selected_indices(), reverse=True)
@@ -2547,21 +2627,21 @@ class MainWindow(QMainWindow):
         self._selected_model = None
         self._rebuild_model_views()
         self._invalidate_toolpaths("Queue cleared.")
-        self._append_log("[INFO] Cleared SVG queue.")
+        self._append_log("[INFO] Cleared artwork queue.")
 
     def _perform_slice(self) -> None:
         if not self.config:
             QMessageBox.warning(self, "Missing Configuration", "Load a configuration before slicing.")
             return
         if not self.models:
-            QMessageBox.warning(self, "Nothing to Slice", "Add SVG files to the build plate first.")
+            QMessageBox.warning(self, "Nothing to Slice", "Add artwork files to the build plate first.")
             return
 
         shapes: List[ShapeGeometry] = []
         for model in self.models:
             shapes.extend(model.transformed_shapes())
         if not shapes:
-            QMessageBox.warning(self, "No Geometry", "The queued SVGs do not contain drawable geometry.")
+            QMessageBox.warning(self, "No Geometry", "The queued artwork does not contain drawable geometry.")
             return
 
         progress = QProgressDialog("Preparing to slice…", None, 0, 0, self)

@@ -1,22 +1,23 @@
 # SVG Slicer for Pen Plotter 3D Printers
 
-SVG Slicer for Pen Plotter 3D Printers bundles a command-line tool and a PySide6 GUI that turn filled SVG artwork into pen-plotter G-code for modified 3D printers. The CLI auto-fits incoming artwork to the printable area and can emit either brightness-driven hatching or palette-based colour passes. The GUI builds on the same engine with queue management, live placement, and configuration editing so you can validate a job before exporting it.
+SVG Slicer for Pen Plotter 3D Printers bundles a command-line tool and a PySide6 GUI that turn SVG and PDF artwork into pen-plotter G-code for modified 3D printers. The CLI auto-fits incoming artwork to the printable area and can emit either brightness-driven hatching or palette-based colour passes. The GUI builds on the same engine with queue management, live placement, and configuration editing so you can validate a job before exporting it.
 
 Under the hood the slicer resolves fills, strokes, and text into geometry, applies configurable perimeter and infill strategies, and writes annotated G-code that documents colour order and motion-only plot time.
 
 ## Features
 
-- PySide6 GUI lets you drag-and-drop multiple SVGs, rescale and rotate each model with live/editable footprint readouts, position artwork directly on the virtual build plate, zoom with the mouse wheel and pan with right-drag, duplicate selected models (`Ctrl+D`), undo placement edits (`Ctrl+Z`), save/load full arrangements as `.plot` layout files, and export the queued job to a single G-code file.
+- PySide6 GUI lets you drag-and-drop multiple SVGs or PDFs, rescale and rotate each model with live/editable footprint readouts, position artwork directly on the virtual build plate, zoom with the mouse wheel and pan with right-drag, duplicate selected models (`Ctrl+D`), undo placement edits (`Ctrl+Z`), save/load full arrangements as `.plot` layout files, and export the queued job to a single G-code file.
 - Built-in configuration editor loads/saves YAML printer profiles including bed limits, feedrates, start/end sequences, pause scripts, and colour palettes.
-- Palette-aware colour workflow maps SVG fills/strokes to the nearest configured colour, batches passes in least-used order, and inserts your pause script (default `M600`) while logging the planned colour order.
+- Palette-aware colour workflow maps artwork fills/strokes to the nearest configured colour, batches passes in least-used order, and inserts your pause script (default `M600`) while logging the planned colour order.
 - Black-and-white mode converts fills to grayscale, driving density-scaled cross-hatch infill with perimeter glides to minimise pen lifts while thick strokes receive dedicated outline passes.
-- Automatically tessellates SVG `<text>` via Matplotlib fonts, converts thick strokes into filled regions, and honours SVG z-order so upper shapes mask lower ones.
+- Automatically tessellates SVG `<text>` via Matplotlib fonts, can replace text with Hershey single-line strokes, converts thick strokes into filled regions, and honours SVG z-order so upper shapes mask lower ones.
+- Imports PDF pages with a hybrid path: vector drawing operators remain vectors, PDF text becomes Hershey strokes, and embedded raster images are sampled with the existing raster sampling settings.
 - Optional Matplotlib preview renders only drawing moves; you can display it interactively or export a PNG for headless environments.
 - G-code output includes a motion-only time estimate and total line count so you can gauge run time before plotting.
 
 ## Installation
 
-SVG Slicer targets Python 3 and relies on Shapely, svgelements, PyYAML, Matplotlib, and (for the GUI) PySide6.
+SVG Slicer targets Python 3 and relies on Shapely, svgelements, PyYAML, Matplotlib, Pillow, PyMuPDF, Hershey-Fonts, and (for the GUI) PySide6.
 
 - **Ubuntu / WSL packages**
 
@@ -28,7 +29,7 @@ SVG Slicer targets Python 3 and relies on Shapely, svgelements, PyYAML, Matplotl
 
   ```bash
   python3 -m pip install --upgrade pip
-  python3 -m pip install svgelements shapely PyYAML matplotlib PySide6
+  python3 -m pip install svgelements shapely PyYAML matplotlib Pillow PyMuPDF Hershey-Fonts PySide6
   ```
 
 PySide6 is only required when launching the GUI; the CLI can run headless.
@@ -67,12 +68,14 @@ python3 -m svg_slicer --config config.yaml
 ```
 
 - Provide `--printer-profile <name>` to open with a specific profile.
-- Drop SVG files onto the build plate or use **Add SVGs…**; each file is auto-fit to the printable area once on import.
+- Drop SVG or PDF files onto the build plate or use **Add Artwork…**; each file is auto-fit to the printable area once on import.
+- For multi-page PDFs, choose one page to import when prompted. Layout files persist the selected page.
+- Enable **Use Hershey text strokes** before import to replace SVG text with single-line Hershey strokes. PDF text always uses Hershey strokes.
 - Select a model to adjust scale (percent), rotation (degrees), and XY position; footprint width/height (mm) can be edited directly and translated into scale.
 - Use the mouse wheel over the build plate to zoom and right-click drag to pan.
 - Use **Edit → Undo** (`Ctrl+Z`) to revert arrangement edits (move, scale, rotation, import, duplicate, delete, clear, and layout load).
-- Use **Edit → Duplicate Selected** (`Ctrl+D`) to clone one or more selected SVGs while preserving each model's current scale and rotation and offsetting position slightly for quick re-layout.
-- Use **File → Save Layout As…** / **File → Load Layout…** (`.plot`) to persist and restore queued SVG placement, scale, and rotation between sessions.
+- Use **Edit → Duplicate Selected** (`Ctrl+D`) to clone one or more selected models while preserving each model's current scale and rotation and offsetting position slightly for quick re-layout.
+- Use **File → Save Layout As…** / **File → Load Layout…** (`.plot`) to persist and restore queued artwork placement, scale, rotation, PDF page, and text mode between sessions.
 - Set the destination path for the exported G-code and press **Slice** to generate toolpaths. The status bar and log window report line count, colour order (if applicable), and the estimated plot time.
 - Loading layouts and applying settings show modal progress dialogs when model reload/reconfiguration work is in progress.
 - Configure printer profiles, palettes, infill, and sampling values on the **Settings** tab, then apply or save back to YAML.
@@ -109,7 +112,9 @@ python3 -m svg_slicer.cli path/to/art.svg \
 Common flags:
 
 - `--preview` opens an interactive Matplotlib window; `--preview-file` saves the image instead.
-- `--scale auto` fits artwork to the printable area (default). Use `--scale none`, `--scale 1`, or another positive factor such as `--scale 0.5` to choose the SVG scale manually.
+- Use a PDF input the same way, adding `--pdf-page 2` to import a specific one-based page. The default is page 1.
+- `--hershey` renders imported text as Hershey single-line strokes. PDF text always uses this path.
+- `--scale auto` fits artwork to the printable area (default). Use `--scale none`, `--scale 1`, or another positive factor such as `--scale 0.5` to choose the artwork scale manually.
 - `--alignment <position>` places artwork inside the printable area. The default is `center`. Supported values are `top-left`, `top-middle`, `top-right`, `center-left`, `center`, `center-right`, `bottom-left`, `bottom-middle`, and `bottom-right`.
 - `--color-mode` or `--bw-mode` override the profile default for a single run.
 - `--log-level` adjusts verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`).
@@ -125,18 +130,18 @@ python3 -m pip install pytest
 pytest -q
 ```
 
-The current suite includes unit tests for configuration parsing, SVG parsing/fit, infill generation, G-code and CLI behavior, handwriting helpers, preview export, and GUI layout history features (undo/duplicate/layout save-load).
+The current suite includes unit tests for configuration parsing, SVG/PDF parsing and fit, infill generation, G-code and CLI behavior, handwriting helpers, preview export, and GUI layout history features (undo/duplicate/layout save-load).
 
 ## Scaling and Colour Behaviour
 
 - The CLI always fits artwork to the configured printable area and mirrors it into printer coordinates, ensuring the result lives within `origin_offsets_mm`.
-- The GUI fits each SVG on import to establish a safe starting scale, but any manual scale, rotation, or placement you apply is preserved during slicing—no additional auto-scaling occurs when you press **Slice**.
+- The GUI fits each imported artwork file on import to establish a safe starting scale, but any manual scale, rotation, or placement you apply is preserved during slicing—no additional auto-scaling occurs when you press **Slice**.
 - Colour mode and black-and-white mode share the same toolpath generator; palette settings live in the active printer profile and can be overridden in both CLI and GUI flows.
 
 ## Notes
 
 - Filled regions are converted into hatchable toolpaths. SVG strokes are traced as outlines by default, or can be drawn as centerlines with `plot_mode`.
 - Brightness mapping clamps infill density between `infill.min_density` and `infill.max_density`, enabling faint shading for light fills and solid hatching for dark regions.
-- Text glyphs are outlined with Matplotlib fonts; if a requested font is unavailable the default fallback face is used.
+- Text glyphs are outlined with Matplotlib fonts by default for SVGs; `--hershey` / the GUI checkbox uses Hershey single-line strokes, and PDF text always uses Hershey strokes.
 - Generated G-code assumes absolute coordinates in millimetres.
 - Preview rendering and exported toolpaths ignore travel moves so only actual drawing strokes appear.

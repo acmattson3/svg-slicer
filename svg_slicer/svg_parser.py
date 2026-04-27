@@ -314,6 +314,19 @@ def _font_properties_for_text(element: Text, font_size: float):
     )
 
 
+def _text_font_available(element: Text, font_size: float) -> bool:
+    family = getattr(element, "font_family", None)
+    if not family:
+        return True
+    try:
+        from matplotlib.font_manager import findfont
+
+        findfont(_font_properties_for_text(element, font_size), fallback_to_default=False)
+        return True
+    except Exception:
+        return False
+
+
 def _text_to_polygons(element: Text, tolerance: float) -> List[Polygon]:
     text_content = getattr(element, "text", None)
     if not text_content:
@@ -417,6 +430,62 @@ def _text_to_polygons(element: Text, tolerance: float) -> List[Polygon]:
             polygons = transformed_polygons
 
     return polygons
+
+
+def _hershey_lines_for_text(
+    text_content: str,
+    *,
+    x_base: float,
+    y_base: float,
+    font_size: float,
+    matrix=None,
+) -> List[LineString]:
+    if not text_content:
+        return []
+    try:
+        from HersheyFonts import HersheyFonts
+    except Exception as exc:  # pragma: no cover - dependency import issues
+        logger.debug("Unable to load Hershey font renderer: %s", exc)
+        return []
+
+    try:
+        font = HersheyFonts()
+        font.load_default_font("rowmans")
+        font.normalize_rendering(max(font_size, 1e-6))
+        raw_lines = list(font.lines_for_text(text_content))
+    except Exception as exc:  # pragma: no cover - defensive for bad glyph data
+        logger.debug("Unable to render Hershey text '%s': %s", text_content, exc)
+        return []
+
+    lines: List[LineString] = []
+    for start, end in raw_lines:
+        line = LineString(
+            [
+                (x_base + float(start[0]), y_base - float(start[1])),
+                (x_base + float(end[0]), y_base - float(end[1])),
+            ]
+        )
+        if matrix is not None:
+            line = shapely_affine_transform(line, _matrix_to_affine_params(matrix))
+        if not line.is_empty and line.length > 0:
+            lines.append(line)
+    return lines
+
+
+def _text_to_hershey_lines(element: Text) -> List[LineString]:
+    text_content = getattr(element, "text", None)
+    if not text_content:
+        return []
+    font_size = _value_to_float(getattr(element, "font_size", None)) or 16.0
+    x_base = _value_to_float(getattr(element, "x", 0.0)) + _value_to_float(getattr(element, "dx", 0.0))
+    y_base = _value_to_float(getattr(element, "y", 0.0)) + _value_to_float(getattr(element, "dy", 0.0))
+    return _hershey_lines_for_text(
+        str(text_content),
+        x_base=x_base,
+        y_base=y_base,
+        font_size=font_size,
+        matrix=getattr(element, "transform", None),
+    )
 
 
 def _path_to_lines(path: Path, tolerance: float, detail_scale: float) -> List[List[Tuple[float, float]]]:
@@ -616,28 +685,19 @@ def _composite_pixel_rgba(pixel) -> Tuple[tuple[int, int, int], float, float]:
     return (comp_r, comp_g, comp_b), max(0.0, min(1.0, brightness)), alpha
 
 
-def _image_to_shape_geometries(
-    element: Image, sampling: SamplingConfig, clip_geom: BaseGeometry | None
+def _raster_pil_image_to_shape_geometries(
+    pil_image,
+    bbox: Tuple[float, float, float, float],
+    sampling: SamplingConfig,
+    clip_geom: BaseGeometry | None,
+    transform_params: List[float] | None = None,
 ) -> List[ShapeGeometry]:
     shapes: List[ShapeGeometry] = []
-
-    try:
-        element.load()
-    except Exception as exc:  # pragma: no cover - guard for malformed images
-        logger.debug("Skipping image that cannot be loaded: %s", exc)
-        return shapes
-
-    pil_image = getattr(element, "image", None)
-    if pil_image is None:
-        return shapes
 
     width_px, height_px = pil_image.size
     if width_px == 0 or height_px == 0:
         return shapes
 
-    bbox = element.bbox()
-    if bbox is None:
-        return shapes
     minx, miny, maxx, maxy = bbox
     width_world = maxx - minx
     height_world = maxy - miny
@@ -668,7 +728,8 @@ def _image_to_shape_geometries(
     resized = pil_image.convert("RGBA").resize((columns, rows), PILImage.BILINEAR)
     pixels = resized.load()
 
-    transform_params = _matrix_to_affine_params(getattr(element, "transform", None))
+    if transform_params is None:
+        transform_params = [width_world, 0.0, 0.0, height_world, minx, miny]
 
     alpha_threshold = 0.05
     skip_brightness_threshold = 0.995
@@ -776,7 +837,34 @@ def _image_to_shape_geometries(
     return shapes
 
 
-def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
+def _image_to_shape_geometries(
+    element: Image, sampling: SamplingConfig, clip_geom: BaseGeometry | None
+) -> List[ShapeGeometry]:
+    try:
+        element.load()
+    except Exception as exc:  # pragma: no cover - guard for malformed images
+        logger.debug("Skipping image that cannot be loaded: %s", exc)
+        return []
+
+    pil_image = getattr(element, "image", None)
+    bbox = element.bbox()
+    if pil_image is None or bbox is None:
+        return []
+    return _raster_pil_image_to_shape_geometries(
+        pil_image,
+        bbox,
+        sampling,
+        clip_geom,
+        transform_params=_matrix_to_affine_params(getattr(element, "transform", None)),
+    )
+
+
+def parse_svg(
+    svg_path: str,
+    sampling: SamplingConfig,
+    *,
+    force_hershey_text: bool = False,
+) -> List[ShapeGeometry]:
     svg = SVG.parse(svg_path)
 
     clip_geometries = _build_clip_paths(svg, sampling, svg_path)
@@ -808,7 +896,38 @@ def parse_svg(svg_path: str, sampling: SamplingConfig) -> List[ShapeGeometry]:
         has_visible_fill = fill_color is not None and fill_alpha not in (None, 0)
 
         if is_text:
+            text_font_size = _value_to_float(getattr(element, "font_size", None)) or 16.0
+            if force_hershey_text or not _text_font_available(element, text_font_size):
+                lines = _apply_clip_to_lines(_text_to_hershey_lines(element), clip_geom)
+                if lines:
+                    brightness = _color_to_brightness(fill_color)
+                    rgb = _color_to_rgb(fill_color)
+                    for line in lines:
+                        shapes.append(
+                            ShapeGeometry(
+                                geometry=line,
+                                brightness=brightness,
+                                stroke_width=0.0,
+                                color=rgb,
+                            )
+                        )
+                continue
             fill_sources = _text_to_polygons(element, tolerance)
+            if has_visible_fill and not fill_sources:
+                lines = _apply_clip_to_lines(_text_to_hershey_lines(element), clip_geom)
+                if lines:
+                    brightness = _color_to_brightness(fill_color)
+                    rgb = _color_to_rgb(fill_color)
+                    for line in lines:
+                        shapes.append(
+                            ShapeGeometry(
+                                geometry=line,
+                                brightness=brightness,
+                                stroke_width=0.0,
+                                color=rgb,
+                            )
+                        )
+                continue
         else:
             if not hasattr(element, "d"):
                 continue

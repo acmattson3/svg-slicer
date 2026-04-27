@@ -1,0 +1,9 @@
+matplotlib
+Pillow
+PyMuPDF
+PySide6
+PyYAML
+shapely
+svgelements
+scipy
+Hershey-Fonts

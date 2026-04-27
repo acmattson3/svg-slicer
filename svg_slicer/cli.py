@@ -22,6 +22,7 @@ try:
 except ImportError:  # pragma: no cover - older Shapely versions
     shapely_make_valid = None
 
+from .artwork_parser import parse_artwork
 from .config import SlicerConfig, load_config
 from .gcode import GcodeGenerator, Toolpath, toolpaths_from_polylines
 from .infill import generate_rectilinear_infill
@@ -31,7 +32,6 @@ from .svg_parser import (
     ShapeGeometry,
     fit_shapes_to_bed,
     normalize_alignment,
-    parse_svg,
     place_shapes_on_bed,
 )
 
@@ -347,7 +347,7 @@ def generate_toolpaths_for_shapes(
 ) -> Tuple[List[Toolpath], float]:
     shape_list = list(shapes)
     if not shape_list:
-        raise RuntimeError("No drawable shapes with fills were found in the SVG.")
+        raise RuntimeError("No drawable shapes were found in the artwork.")
     alignment = normalize_alignment(alignment)
 
     _notify(progress_update, "Preparing shapes…")
@@ -370,7 +370,7 @@ def generate_toolpaths_for_shapes(
     else:
         if scale_factor is not None:
             raise ValueError(
-                "Manual scale requires fit_to_bed=True so SVG coordinates can be placed on the build plate."
+                "Manual scale requires fit_to_bed=True so artwork coordinates can be placed on the build plate."
             )
         fitted_shapes = shape_list
         applied_scale = 1.0
@@ -381,7 +381,7 @@ def generate_toolpaths_for_shapes(
         progress_update=progress_update,
     )
     if not toolpaths:
-        raise RuntimeError("No toolpaths were generated from the SVG.")
+        raise RuntimeError("No toolpaths were generated from the artwork.")
     _notify(progress_update, "Toolpaths ready.")
     return toolpaths, applied_scale
 
@@ -590,7 +590,7 @@ def _parse_alignment_argument(value: str) -> str:
 
 
 def slice_svg_to_gcode(
-    svg_path: Path,
+    artwork_path: Path,
     output_path: Path,
     config: SlicerConfig,
     preview: bool,
@@ -598,8 +598,15 @@ def slice_svg_to_gcode(
     *,
     scale_factor: Optional[float] = None,
     alignment: str = "center",
+    pdf_page: int = 1,
+    force_hershey_text: bool = False,
 ) -> None:
-    shapes = parse_svg(str(svg_path), config.sampling)
+    shapes = parse_artwork(
+        artwork_path,
+        config.sampling,
+        pdf_page=pdf_page,
+        force_hershey_text=force_hershey_text,
+    )
     toolpaths, applied_scale = generate_toolpaths_for_shapes(
         shapes,
         config,
@@ -607,9 +614,9 @@ def slice_svg_to_gcode(
         alignment=alignment,
     )
     if scale_factor is None:
-        logger.info("Scaled SVG by factor %.3f to fit printable area", applied_scale)
+        logger.info("Scaled artwork by factor %.3f to fit printable area", applied_scale)
     else:
-        logger.info("Applied SVG scale factor %.3f", applied_scale)
+        logger.info("Applied artwork scale factor %.3f", applied_scale)
 
     write_toolpaths_to_gcode(toolpaths, output_path, config)
 
@@ -619,8 +626,8 @@ def slice_svg_to_gcode(
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Slice an SVG into G-code for pen plotter 3D printers.")
-    parser.add_argument("svg", type=Path, help="Path to the source SVG file")
+    parser = argparse.ArgumentParser(description="Slice SVG or PDF artwork into G-code for pen plotter 3D printers.")
+    parser.add_argument("artwork", type=Path, help="Path to the source SVG or PDF file")
     parser.add_argument("--config", type=Path, default=Path("config.yaml"), help="Path to slicer configuration YAML")
     parser.add_argument(
         "--printer-profile",
@@ -648,7 +655,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="FACTOR",
         help=(
-            "Scale SVG by FACTOR before placing it on the print area. "
+            "Scale artwork by FACTOR before placing it on the print area. "
             "Use 'auto' to fit to the printable area (default), or 'none'/1 for no scaling."
         ),
     )
@@ -659,10 +666,22 @@ def build_argument_parser() -> argparse.ArgumentParser:
         choices=VALID_ALIGNMENTS,
         metavar="POSITION",
         help=(
-            "Place the SVG within the printable area using POSITION. "
+            "Place the artwork within the printable area using POSITION. "
             "Choices: top-left, top-middle, top-right, center-left, center, "
             "center-right, bottom-left, bottom-middle, bottom-right."
         ),
+    )
+    parser.add_argument(
+        "--pdf-page",
+        type=int,
+        default=1,
+        metavar="PAGE",
+        help="One-based page number to import when the source artwork is a PDF. Defaults to 1.",
+    )
+    parser.add_argument(
+        "--hershey",
+        action="store_true",
+        help="Render text as Hershey single-line strokes instead of filled font outlines.",
     )
     parser.add_argument(
         "--color-mode",
@@ -706,16 +725,18 @@ def main(argv: List[str] | None = None) -> int:
 
     try:
         slice_svg_to_gcode(
-            args.svg,
+            args.artwork,
             args.output,
             config,
             args.preview,
             args.preview_file,
             scale_factor=args.scale,
             alignment=args.alignment,
+            pdf_page=args.pdf_page,
+            force_hershey_text=args.hershey,
         )
     except Exception as exc:  # pragma: no cover - CLI surface
-        logger.error("Failed to slice SVG: %s", exc)
+        logger.error("Failed to slice artwork: %s", exc)
         return 1
     return 0
 
