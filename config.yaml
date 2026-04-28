@@ -15,7 +15,7 @@ printers:
       travel: 1.5
       raster_travel: 1.5
     z_lift_height_mm: 1.5
-    glide_threshold_mm: 0.8
+    glide_threshold_mm: 2.5
     feedrates_mm_s:
       draw: 175.0
       travel: 175.0
@@ -48,6 +48,7 @@ printers:
     end_gcode:
       - G1 Z2.0.000 F10500 ; lift pen
       - G1 X14.000 Y206.000 F10500 ; park at rear-left
+      - G1 Z20 ; lift pen more
       - M18 ; disable steppers
   prusa_xl:
     name: Prusa XL
