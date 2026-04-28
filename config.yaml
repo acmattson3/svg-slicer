@@ -136,7 +136,7 @@ perimeter:
   min_fill_mode: min
 sampling:
   segment_length_tolerance_mm: 1.5
-  outline_simplify_tolerance_mm: 0.3
+  outline_simplify_tolerance_mm: 0.1
   curve_detail_scale: 0.5
   raster_sample_spacing_mm: 2.0
   raster_max_cells: 4000
