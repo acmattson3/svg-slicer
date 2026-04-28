@@ -9,6 +9,7 @@ from svg_slicer.config import PrinterConfig
 from svg_slicer.svg_parser import (
     ShapeGeometry,
     _cached_hershey_glyph_data,
+    _hershey_grouped_lines_for_text,
     _hershey_lines_for_text,
     _raster_pil_image_to_shape_geometries,
     fit_shapes_to_bed,
@@ -160,6 +161,17 @@ def test_hershey_glyph_data_cache_reuses_repeated_letters() -> None:
     cache_info = _cached_hershey_glyph_data.cache_info()
     assert cache_info.hits >= 2
     assert cache_info.currsize >= 3
+
+
+def test_hershey_grouped_lines_split_disconnected_glyph_parts() -> None:
+    pytest.importorskip("HersheyFonts")
+    grouped_i = _hershey_grouped_lines_for_text("i", x_base=0.0, y_base=0.0, font_size=12.0)
+    grouped_colon = _hershey_grouped_lines_for_text(":", x_base=0.0, y_base=0.0, font_size=12.0)
+    grouped_a = _hershey_grouped_lines_for_text("A", x_base=0.0, y_base=0.0, font_size=12.0)
+
+    assert len({group for group, _ in grouped_i}) == 2
+    assert len({group for group, _ in grouped_colon}) == 2
+    assert len({group for group, _ in grouped_a}) == 1
 
 
 def test_parse_svg_missing_font_falls_back_to_hershey(tmp_path: Path, slicer_config) -> None:

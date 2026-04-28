@@ -873,7 +873,13 @@ def _hershey_grouped_lines_for_text(
     for character_index, character in enumerate(text_content):
         glyph_lines, advance_x = _cached_hershey_glyph_data(character, max(font_size, 1e-6), font_name)
         glyph_group = f"{group_prefix}:{character_index}"
-        for glyph_line in glyph_lines:
+        split_disconnected_parts = len(glyph_lines) > 1
+        for line_index, glyph_line in enumerate(glyph_lines):
+            line_group = (
+                f"{glyph_group}:{line_index}"
+                if split_disconnected_parts
+                else glyph_group
+            )
             line = LineString(
                 [
                     (x_base + current_x + float(px), y_base - float(py))
@@ -883,7 +889,7 @@ def _hershey_grouped_lines_for_text(
             if matrix is not None:
                 line = shapely_affine_transform(line, _matrix_to_affine_params(matrix))
             if not line.is_empty and line.length > 0:
-                lines.append((glyph_group, line))
+                lines.append((line_group, line))
         current_x += advance_x
     return lines
 
