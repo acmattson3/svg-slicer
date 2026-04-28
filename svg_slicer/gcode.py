@@ -214,12 +214,18 @@ class GcodeGenerator:
             self._linear_move(point, draw_feed)
         self._set_pen_state(False, travel_height, z_feed)
 
-    def draw_toolpaths(self, toolpaths: Iterable[Toolpath], feedrates: Feedrates) -> None:
+    def draw_toolpaths(
+        self,
+        toolpaths: Iterable[Toolpath],
+        feedrates: Feedrates,
+        *,
+        optimize_order: bool = True,
+    ) -> None:
         path_list = [toolpath for toolpath in toolpaths if len(toolpath.points) >= 2]
         if not path_list:
             return
 
-        if not any(toolpath.tag == "raster" for toolpath in path_list):
+        if optimize_order and not any(toolpath.tag == "raster" for toolpath in path_list):
             start_point = self._position or (self.printer.x_min, self.printer.y_min)
             path_list = _optimize_toolpath_order(path_list, start_point=start_point)
 

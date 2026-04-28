@@ -45,7 +45,18 @@ _ALIGNMENT_FACTORS = {
 }
 
 _WHITESPACE_RE = re.compile(r"\s+")
-
+_SUPERSCRIPT_BASE_MAP = {
+    "⁰": "0",
+    "¹": "1",
+    "²": "2",
+    "³": "3",
+    "⁴": "4",
+    "⁵": "5",
+    "⁶": "6",
+    "⁷": "7",
+    "⁸": "8",
+    "⁹": "9",
+}
 
 @dataclass
 class ShapeGeometry:
@@ -397,6 +408,69 @@ def _fit_lines_to_bounds(
     return fitted
 
 
+def _fit_polygons_to_bounds(
+    polygons: List[Polygon],
+    target_bounds: Tuple[float, float, float, float] | None,
+    *,
+    anchor_x: str = "center",
+    anchor_y: str = "center",
+) -> List[Polygon]:
+    if not polygons or target_bounds is None:
+        return polygons
+
+    poly_bounds = _combined_bounds(polygons)
+    if poly_bounds is None:
+        return polygons
+
+    minx, miny, maxx, maxy = poly_bounds
+    target_minx, target_miny, target_maxx, target_maxy = target_bounds
+    width = maxx - minx
+    height = maxy - miny
+    target_width = target_maxx - target_minx
+    target_height = target_maxy - target_miny
+    if width <= 0 or height <= 0 or target_width <= 0 or target_height <= 0:
+        return polygons
+
+    scale_factor = min(1.0, target_width / width, target_height / height)
+    target_center_x = target_minx + target_width / 2.0
+    target_center_y = target_miny + target_height / 2.0
+    source_center_x = minx + width / 2.0
+    source_center_y = miny + height / 2.0
+
+    fitted: List[Polygon] = []
+    for polygon in polygons:
+        geom = polygon
+        if scale_factor < 1.0:
+            geom = shapely_scale(
+                geom,
+                xfact=scale_factor,
+                yfact=scale_factor,
+                origin=(source_center_x, source_center_y),
+            )
+        geom_bounds = geom.bounds
+        geom_minx, geom_miny, geom_maxx, geom_maxy = geom_bounds
+        if anchor_x == "left":
+            xoff = target_minx - geom_minx
+        elif anchor_x == "right":
+            xoff = target_maxx - geom_maxx
+        else:
+            xoff = target_center_x - ((geom_minx + geom_maxx) / 2.0)
+        if anchor_y == "top":
+            yoff = target_miny - geom_miny
+        elif anchor_y == "bottom":
+            yoff = target_maxy - geom_maxy
+        else:
+            yoff = target_center_y - ((geom_miny + geom_maxy) / 2.0)
+        geom = shapely_translate(
+            geom,
+            xoff=xoff,
+            yoff=yoff,
+        )
+        if not geom.is_empty and geom.area > 0:
+            fitted.append(geom)
+    return fitted
+
+
 def _merge_connected_ordered_lines(lines: List[LineString], *, tolerance: float = 1e-9) -> List[LineString]:
     merged: List[LineString] = []
     current_points: List[Tuple[float, float]] = []
@@ -670,6 +744,44 @@ def _normalize_hershey_text(text_content: str) -> str:
     return _WHITESPACE_RE.sub(" ", text_content).strip()
 
 
+def _glyph_data_for_character(
+    character: str,
+    font_size: float,
+    font_name: str = "rowmans",
+) -> Tuple[Tuple[Tuple[Tuple[float, float], ...], ...], float]:
+    glyph_lines, advance_x = _cached_hershey_glyph_data(character, font_size, font_name)
+    if glyph_lines:
+        return glyph_lines, advance_x
+
+    superscript_base = _SUPERSCRIPT_BASE_MAP.get(character)
+    if superscript_base is not None:
+        base_lines, base_advance = _cached_hershey_glyph_data(superscript_base, font_size, font_name)
+        if base_lines:
+            scale = 0.65
+            shifted = tuple(
+                tuple(
+                    (float(x) * scale, float(y) * scale + font_size * 0.2)
+                    for x, y in line
+                )
+                for line in base_lines
+            )
+            return shifted, base_advance * scale
+
+    return tuple(), 0.0
+
+
+def _text_supported_by_hershey(text_content: str, font_size: float, font_name: str = "rowmans") -> bool:
+    for character in text_content:
+        if character.isspace():
+            continue
+        glyph_lines, advance_x = _glyph_data_for_character(character, font_size, font_name)
+        if advance_x <= 0 and not glyph_lines:
+            return False
+        if not glyph_lines:
+            return False
+    return True
+
+
 @lru_cache(maxsize=512)
 def _cached_hershey_glyph_data(
     character: str,
@@ -714,24 +826,41 @@ def _cached_hershey_glyph_data(
     return merged_coords, advance_x
 
 
-def _text_to_polygons(
-    element: Text,
-    tolerance: float,
+def _text_string_to_polygons(
+    text_content: str | None,
     *,
-    text_override: str | None = None,
+    font_size: float,
+    x_base: float = 0.0,
+    y_base: float = 0.0,
+    dx: float = 0.0,
+    dy: float = 0.0,
+    anchor: str | None = None,
+    font_family=None,
+    font_style=None,
+    font_weight=None,
+    matrix=None,
 ) -> List[Polygon]:
-    text_content = text_override if text_override is not None else getattr(element, "text", None)
     if not text_content:
         return []
-    font_size_value = getattr(element, "font_size", None)
-    font_size = _value_to_float(font_size_value) or 16.0
     if font_size <= 0:
         return []
 
     try:
         from matplotlib.textpath import TextPath
+        from matplotlib.font_manager import FontProperties
 
-        font_props = _font_properties_for_text(element, font_size)
+        if isinstance(font_family, str):
+            families = [f.strip().strip("'\"") for f in font_family.split(",") if f.strip()]
+        elif isinstance(font_family, (list, tuple)):
+            families = [str(f).strip().strip("'\"") for f in font_family if str(f).strip()]
+        else:
+            families = []
+        font_props = FontProperties(
+            family=families or None,
+            style=_normalize_font_style(font_style),
+            weight=_normalize_font_weight(font_weight),
+            size=font_size,
+        )
         text_path = TextPath(
             (0, 0),
             text_content,
@@ -745,11 +874,6 @@ def _text_to_polygons(
 
     bbox = text_path.get_extents()
     text_width = bbox.width if bbox.width is not None else 0.0
-    anchor = getattr(element, "anchor", None)
-    x_base = _value_to_float(getattr(element, "x", 0.0))
-    dx = _value_to_float(getattr(element, "dx", 0.0))
-    y_base = _value_to_float(getattr(element, "y", 0.0))
-    dy = _value_to_float(getattr(element, "dy", 0.0))
     x_reference = bbox.x0
     if anchor in {"middle", "center"}:
         x_reference = bbox.x0 + text_width / 2.0
@@ -805,7 +929,6 @@ def _text_to_polygons(
             continue
         polygons.append(polygon)
 
-    matrix = getattr(element, "transform", None)
     if matrix is not None:
         is_identity = getattr(matrix, "is_identity", None)
         identity = False
@@ -822,6 +945,30 @@ def _text_to_polygons(
             polygons = transformed_polygons
 
     return polygons
+
+
+def _text_to_polygons(
+    element: Text,
+    tolerance: float,
+    *,
+    text_override: str | None = None,
+) -> List[Polygon]:
+    text_content = text_override if text_override is not None else getattr(element, "text", None)
+    font_size_value = getattr(element, "font_size", None)
+    font_size = _value_to_float(font_size_value) or 16.0
+    return _text_string_to_polygons(
+        text_content,
+        font_size=font_size,
+        x_base=_value_to_float(getattr(element, "x", 0.0)),
+        y_base=_value_to_float(getattr(element, "y", 0.0)),
+        dx=_value_to_float(getattr(element, "dx", 0.0)),
+        dy=_value_to_float(getattr(element, "dy", 0.0)),
+        anchor=getattr(element, "anchor", None),
+        font_family=getattr(element, "font_family", None),
+        font_style=getattr(element, "font_style", None),
+        font_weight=getattr(element, "font_weight", None),
+        matrix=getattr(element, "transform", None),
+    )
 
 
 def _hershey_lines_for_text(
@@ -871,7 +1018,7 @@ def _hershey_grouped_lines_for_text(
     lines: List[Tuple[str, LineString]] = []
     current_x = 0.0
     for character_index, character in enumerate(text_content):
-        glyph_lines, advance_x = _cached_hershey_glyph_data(character, max(font_size, 1e-6), font_name)
+        glyph_lines, advance_x = _glyph_data_for_character(character, max(font_size, 1e-6), font_name)
         glyph_group = f"{group_prefix}:{character_index}"
         split_disconnected_parts = len(glyph_lines) > 1
         for line_index, glyph_line in enumerate(glyph_lines):
@@ -1323,34 +1470,53 @@ def parse_svg(
         if is_text:
             text_font_size = _value_to_float(getattr(element, "font_size", None)) or 16.0
             font_available = _text_font_available(element, text_font_size)
+            normalized_raw_text = _normalize_hershey_text(str(getattr(element, "text", "") or ""))
+            hershey_supported = _text_supported_by_hershey(normalized_raw_text, text_font_size)
             if force_hershey_text or not font_available:
-                normalized_text = _normalize_hershey_text(str(getattr(element, "text", "") or ""))
-                target_bounds = _combined_bounds(
-                    _text_to_polygons(element, tolerance, text_override=normalized_text)
-                )
-                grouped_lines = _hershey_grouped_lines_for_text(
-                    str(getattr(element, "text", "") or ""),
-                    x_base=_value_to_float(getattr(element, "x", 0.0)) + _value_to_float(getattr(element, "dx", 0.0)),
-                    y_base=_value_to_float(getattr(element, "y", 0.0)) + _value_to_float(getattr(element, "dy", 0.0)),
-                    font_size=text_font_size,
-                    matrix=getattr(element, "transform", None),
-                    group_prefix=f"svg-text:{id(element)}",
-                )
-                lines = _fit_lines_to_bounds([line for _, line in grouped_lines], target_bounds)
-                lines = _apply_clip_to_lines(lines, clip_geom)
-                if lines:
-                    brightness = _color_to_brightness(fill_color)
-                    rgb = _color_to_rgb(fill_color)
-                    for index, line in enumerate(lines):
-                        shapes.append(
-                            ShapeGeometry(
-                                geometry=line,
-                                brightness=brightness,
-                                stroke_width=0.0,
-                                color=rgb,
-                                toolpath_group=grouped_lines[min(index, len(grouped_lines) - 1)][0] if grouped_lines else None,
+                if not hershey_supported:
+                    fill_sources = _text_to_polygons(element, tolerance, text_override=normalized_raw_text)
+                    polygons = _apply_clip(fill_sources, clip_geom) if fill_sources else []
+                    if polygons:
+                        brightness = _color_to_brightness(fill_color)
+                        rgb = _color_to_rgb(fill_color)
+                        for polygon in polygons:
+                            if polygon.is_empty or polygon.area <= 0:
+                                continue
+                            shapes.append(
+                                ShapeGeometry(
+                                    geometry=polygon,
+                                    brightness=brightness,
+                                    stroke_width=None,
+                                    color=rgb,
+                                )
                             )
-                        )
+                else:
+                    target_bounds = _combined_bounds(
+                        _text_to_polygons(element, tolerance, text_override=normalized_raw_text)
+                    )
+                    grouped_lines = _hershey_grouped_lines_for_text(
+                        str(getattr(element, "text", "") or ""),
+                        x_base=_value_to_float(getattr(element, "x", 0.0)) + _value_to_float(getattr(element, "dx", 0.0)),
+                        y_base=_value_to_float(getattr(element, "y", 0.0)) + _value_to_float(getattr(element, "dy", 0.0)),
+                        font_size=text_font_size,
+                        matrix=getattr(element, "transform", None),
+                        group_prefix=f"svg-text:{id(element)}",
+                    )
+                    lines = _fit_lines_to_bounds([line for _, line in grouped_lines], target_bounds)
+                    lines = _apply_clip_to_lines(lines, clip_geom)
+                    if lines:
+                        brightness = _color_to_brightness(fill_color)
+                        rgb = _color_to_rgb(fill_color)
+                        for index, line in enumerate(lines):
+                            shapes.append(
+                                ShapeGeometry(
+                                    geometry=line,
+                                    brightness=brightness,
+                                    stroke_width=0.0,
+                                    color=rgb,
+                                    toolpath_group=grouped_lines[min(index, len(grouped_lines) - 1)][0] if grouped_lines else None,
+                                )
+                            )
                 continue
             fill_sources = _text_to_polygons(element, tolerance)
             if has_visible_fill and not fill_sources:

@@ -155,3 +155,22 @@ def test_parse_pdf_hershey_text_normalizes_tab_split_spans(tmp_path: Path, slice
     )
 
     assert spaced_width == pytest.approx(normal_width, rel=0.05)
+
+
+def test_parse_pdf_hershey_text_keeps_superscript_and_diameter_symbol(tmp_path: Path, slicer_config) -> None:
+    fitz = pytest.importorskip("fitz")
+
+    path = tmp_path / "symbols.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=240, height=120)
+    page.insert_text((20, 40), "Density (g/m³)", fontsize=18, color=(0, 0, 0))
+    page.insert_text((20, 80), "Inner Sphere Ø0.825", fontsize=18, color=(0, 0, 0))
+    doc.save(str(path))
+    doc.close()
+
+    shapes = parse_artwork(path, slicer_config.sampling, pdf_page=1)
+    assert shapes
+    line_shapes = [shape for shape in shapes if isinstance(shape.geometry, LineString)]
+    assert line_shapes
+    maxx = max(shape.geometry.bounds[2] for shape in shapes)
+    assert maxx > 120.0

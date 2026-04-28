@@ -124,6 +124,14 @@ def test_argument_parser_supports_raster_spacing() -> None:
     assert args.raster_spacing == pytest.approx(0.75)
 
 
+def test_argument_parser_supports_write_in_order() -> None:
+    parser = cli.build_argument_parser()
+
+    args = parser.parse_args(["input.pdf", "--write-in-order"])
+
+    assert args.write_in_order is True
+
+
 def test_rotate_shapes_rotates_geometry_and_centerline() -> None:
     shape = ShapeGeometry(
         geometry=Polygon([(0, 0), (4, 0), (4, 2), (0, 2)]),
@@ -389,6 +397,21 @@ def test_write_toolpaths_to_gcode_verbose_flag_emits_debug_comments(tmp_path: Pa
     assert "GLIDE gap=0.500mm to toolpath 2/2" in text
 
 
+def test_write_toolpaths_to_gcode_write_in_order_keeps_input_order(tmp_path: Path, config_path: Path) -> None:
+    config = cli.load_config(config_path)
+    toolpaths = [
+        Toolpath(points=((10, 0), (11, 0))),
+        Toolpath(points=((0, 0), (1, 0))),
+    ]
+    output = tmp_path / "ordered.gcode"
+
+    cli.write_toolpaths_to_gcode(toolpaths, output, config, write_in_order=True)
+
+    text = output.read_text(encoding="utf-8")
+    first_rapid = next(line for line in text.splitlines() if line.startswith("G0 "))
+    assert first_rapid.startswith("G0 X10.000 Y0.000")
+
+
 def test_write_toolpaths_to_gcode_color_mode_omits_white_paths(tmp_path: Path, color_config_path: Path) -> None:
     config = cli.load_config(color_config_path)
     config.printer.available_colors = ["#FFFFFF", "#000000"]
@@ -452,6 +475,7 @@ def test_main_respects_color_mode_override(monkeypatch, slicer_config, tmp_path:
         force_hershey_text=False,
         rotation_degrees=0.0,
         verbose_gcode=False,
+        write_in_order=False,
     ):
         called["svg"] = svg
         called["output"] = output
@@ -462,6 +486,7 @@ def test_main_respects_color_mode_override(monkeypatch, slicer_config, tmp_path:
         called["force_hershey_text"] = force_hershey_text
         called["rotation_degrees"] = rotation_degrees
         called["verbose_gcode"] = verbose_gcode
+        called["write_in_order"] = write_in_order
 
     monkeypatch.setattr(cli, "load_config", fake_load_config)
     monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)
@@ -477,6 +502,7 @@ def test_main_respects_color_mode_override(monkeypatch, slicer_config, tmp_path:
     assert called["pdf_page"] == 1
     assert called["force_hershey_text"] is False
     assert called["rotation_degrees"] == pytest.approx(0.0)
+    assert called["write_in_order"] is False
 
 
 def test_main_passes_manual_scale_to_slice(monkeypatch, slicer_config, tmp_path: Path) -> None:
@@ -498,6 +524,7 @@ def test_main_passes_manual_scale_to_slice(monkeypatch, slicer_config, tmp_path:
         force_hershey_text=False,
         rotation_degrees=0.0,
         verbose_gcode=False,
+        write_in_order=False,
     ):
         called["scale_factor"] = scale_factor
         called["alignment"] = alignment
@@ -505,6 +532,7 @@ def test_main_passes_manual_scale_to_slice(monkeypatch, slicer_config, tmp_path:
         called["force_hershey_text"] = force_hershey_text
         called["rotation_degrees"] = rotation_degrees
         called["verbose_gcode"] = verbose_gcode
+        called["write_in_order"] = write_in_order
 
     monkeypatch.setattr(cli, "load_config", fake_load_config)
     monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)
@@ -538,11 +566,13 @@ def test_main_passes_pdf_page_and_hershey_to_slice(monkeypatch, slicer_config, t
         force_hershey_text=False,
         rotation_degrees=0.0,
         verbose_gcode=False,
+        write_in_order=False,
     ):
         called["pdf_page"] = pdf_page
         called["force_hershey_text"] = force_hershey_text
         called["rotation_degrees"] = rotation_degrees
         called["verbose_gcode"] = verbose_gcode
+        called["write_in_order"] = write_in_order
 
     monkeypatch.setattr(cli, "load_config", fake_load_config)
     monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)
@@ -555,6 +585,7 @@ def test_main_passes_pdf_page_and_hershey_to_slice(monkeypatch, slicer_config, t
     assert called["pdf_page"] == 4
     assert called["force_hershey_text"] is True
     assert called["rotation_degrees"] == pytest.approx(45.0)
+    assert called["write_in_order"] is False
 
 
 def test_main_passes_raster_spacing_override(monkeypatch, slicer_config, tmp_path: Path) -> None:
@@ -577,9 +608,11 @@ def test_main_passes_raster_spacing_override(monkeypatch, slicer_config, tmp_pat
         force_hershey_text=False,
         rotation_degrees=0.0,
         verbose_gcode=False,
+        write_in_order=False,
     ):
         called["raster_spacing"] = config.sampling.raster_sample_spacing
         called["verbose_gcode"] = verbose_gcode
+        called["write_in_order"] = write_in_order
 
     monkeypatch.setattr(cli, "load_config", fake_load_config)
     monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)
@@ -590,6 +623,40 @@ def test_main_passes_raster_spacing_override(monkeypatch, slicer_config, tmp_pat
     code = cli.main([str(pdf_path), "--raster-spacing", "0.6"])
     assert code == 0
     assert called["raster_spacing"] == pytest.approx(0.6)
+
+
+def test_main_passes_write_in_order_to_slice(monkeypatch, slicer_config, tmp_path: Path) -> None:
+    called = {}
+
+    def fake_load_config(path, profile=None):
+        return slicer_config
+
+    def fake_slice(
+        svg,
+        output,
+        config,
+        preview,
+        preview_file,
+        *,
+        scale_factor=None,
+        alignment="center",
+        pdf_page=1,
+        force_hershey_text=False,
+        rotation_degrees=0.0,
+        verbose_gcode=False,
+        write_in_order=False,
+    ):
+        called["write_in_order"] = write_in_order
+
+    monkeypatch.setattr(cli, "load_config", fake_load_config)
+    monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)
+
+    pdf_path = tmp_path / "input.pdf"
+    pdf_path.write_bytes(b"%PDF-1.7\n")
+
+    code = cli.main([str(pdf_path), "--write-in-order"])
+    assert code == 0
+    assert called["write_in_order"] is True
 
 
 def test_main_fails_when_color_mode_enabled_without_palette(monkeypatch, slicer_config, tmp_path: Path) -> None:

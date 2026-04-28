@@ -12,6 +12,7 @@ from svg_slicer.svg_parser import (
     _hershey_grouped_lines_for_text,
     _hershey_lines_for_text,
     _raster_pil_image_to_shape_geometries,
+    _text_supported_by_hershey,
     fit_shapes_to_bed,
     parse_svg,
     place_shapes_on_bed,
@@ -172,6 +173,13 @@ def test_hershey_grouped_lines_split_disconnected_glyph_parts() -> None:
     assert len({group for group, _ in grouped_i}) == 2
     assert len({group for group, _ in grouped_colon}) == 2
     assert len({group for group, _ in grouped_a}) == 1
+
+
+def test_hershey_reports_superscript_and_diameter_symbol_as_unsupported() -> None:
+    pytest.importorskip("HersheyFonts")
+    assert _text_supported_by_hershey("³", 12.0) is True
+    assert _text_supported_by_hershey("Ø", 12.0) is False
+    assert _text_supported_by_hershey("ø", 12.0) is False
 
 
 def test_parse_svg_missing_font_falls_back_to_hershey(tmp_path: Path, slicer_config) -> None:

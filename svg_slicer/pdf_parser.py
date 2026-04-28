@@ -13,14 +13,17 @@ from .svg_parser import (
     ShapeGeometry,
     _color_to_brightness,
     _fit_lines_to_bounds,
+    _fit_polygons_to_bounds,
+    _glyph_data_for_character,
     _geometry_to_lines,
     _geometry_to_polygons,
     _hershey_grouped_lines_for_text,
-    _hershey_lines_for_text,
     _merge_connected_ordered_lines,
     _normalize_hershey_text,
     _raster_pil_image_to_shape_geometries,
     _resolve_visibility,
+    _text_string_to_polygons,
+    _text_supported_by_hershey,
 )
 
 
@@ -265,18 +268,7 @@ def _text_block_to_shapes(block) -> List[ShapeGeometry]:
         origin = line.get("origin") or first_span.get("origin") or (0.0, 0.0)
         size = float(first_span.get("size") or 12.0)
         rgb = _pdf_rgb_to_tuple(first_span.get("color")) or (0, 0, 0)
-        grouped_raw_lines = _hershey_grouped_lines_for_text(
-            text,
-            x_base=0.0,
-            y_base=0.0,
-            font_size=size,
-            group_prefix=f"pdf-text:{origin[0]:.3f}:{origin[1]:.3f}:{text}",
-        )
         transform = [cos_a, sin_a, -sin_a, cos_a, float(origin[0]), float(origin[1])]
-        transformed_lines = [
-            (group, shapely_affine_transform(hershey_line, transform))
-            for group, hershey_line in grouped_raw_lines
-        ]
 
         span_bounds = [span.get("bbox") for span in spans if span.get("bbox") and len(span.get("bbox")) >= 4]
         nonspace_chars = [
@@ -312,19 +304,120 @@ def _text_block_to_shapes(block) -> List[ShapeGeometry]:
                 max(float(bbox[2]) for bbox in span_bounds),
                 max(float(bbox[3]) for bbox in span_bounds),
             )
-        fitted_lines = _fit_lines_to_bounds([line for _, line in transformed_lines], target_bounds)
-        for index, geom in enumerate(fitted_lines):
-            if geom.is_empty or geom.length <= 0:
-                continue
-            shapes.append(
-                ShapeGeometry(
-                    geometry=geom,
-                    brightness=_rgb_to_brightness(rgb),
-                    stroke_width=0.0,
-                    color=rgb,
-                    toolpath_group=transformed_lines[min(index, len(transformed_lines) - 1)][0] if transformed_lines else None,
+        if not _text_supported_by_hershey(text, size):
+            grouped_raw_lines = []
+            current_x = 0.0
+            for span_index, span in enumerate(spans):
+                span_size = float(span.get("size") or size)
+                for char_index, char in enumerate(span.get("chars", [])):
+                    char_text = str(char.get("c", "") or "")
+                    if not char_text:
+                        continue
+                    char_bbox = char.get("bbox")
+                    char_width = 0.0
+                    if char_bbox and len(char_bbox) >= 4:
+                        char_width = max(0.0, float(char_bbox[2]) - float(char_bbox[0]))
+                    if char_text.isspace():
+                        current_x += char_width
+                        continue
+                    glyph_lines, advance_x = _glyph_data_for_character(char_text, span_size)
+                    if glyph_lines:
+                        char_group = f"pdf-text:{origin[0]:.3f}:{origin[1]:.3f}:{span_index}:{char_index}"
+                        for line in glyph_lines:
+                            grouped_raw_lines.append(
+                                (
+                                    char_group,
+                                    LineString(
+                                        [
+                                            (current_x + float(px), -float(py))
+                                            for px, py in line
+                                        ]
+                                    ),
+                                )
+                            )
+                        current_x += advance_x if advance_x > 0 else char_width
+                    else:
+                        if char_bbox and len(char_bbox) >= 4:
+                            char_bounds = (
+                                float(char_bbox[0]),
+                                float(char_bbox[1]),
+                                float(char_bbox[2]),
+                                float(char_bbox[3]),
+                            )
+                            polygons = _text_string_to_polygons(
+                                char_text,
+                                font_size=span_size,
+                                font_family=span.get("font") or first_span.get("font"),
+                            )
+                            polygons = _fit_polygons_to_bounds(
+                                polygons,
+                                char_bounds,
+                                anchor_x="left",
+                                anchor_y="top",
+                            )
+                            char_width = char_bounds[2] - char_bounds[0]
+                            if char_width > 0:
+                                polygons = [
+                                    shapely_affine_transform(
+                                        polygon,
+                                        [1.0, 0.0, 0.0, 1.0, -(char_width * 0.25), 0.0],
+                                    )
+                                    for polygon in polygons
+                                ]
+                            for polygon in polygons:
+                                if polygon.is_empty or polygon.area <= 0:
+                                    continue
+                                shapes.append(
+                                    ShapeGeometry(
+                                        geometry=polygon,
+                                        brightness=_rgb_to_brightness(rgb),
+                                        stroke_width=None,
+                                        color=rgb,
+                                    )
+                                )
+                        current_x += char_width
+            transformed_lines = [
+                (group, shapely_affine_transform(hershey_line, transform))
+                for group, hershey_line in grouped_raw_lines
+            ]
+            fitted_lines = _fit_lines_to_bounds([line for _, line in transformed_lines], target_bounds)
+            for index, geom in enumerate(fitted_lines):
+                if geom.is_empty or geom.length <= 0:
+                    continue
+                shapes.append(
+                    ShapeGeometry(
+                        geometry=geom,
+                        brightness=_rgb_to_brightness(rgb),
+                        stroke_width=0.0,
+                        color=rgb,
+                        toolpath_group=transformed_lines[min(index, len(transformed_lines) - 1)][0] if transformed_lines else None,
+                    )
                 )
+        else:
+            grouped_raw_lines = _hershey_grouped_lines_for_text(
+                text,
+                x_base=0.0,
+                y_base=0.0,
+                font_size=size,
+                group_prefix=f"pdf-text:{origin[0]:.3f}:{origin[1]:.3f}:{text}",
             )
+            transformed_lines = [
+                (group, shapely_affine_transform(hershey_line, transform))
+                for group, hershey_line in grouped_raw_lines
+            ]
+            fitted_lines = _fit_lines_to_bounds([line for _, line in transformed_lines], target_bounds)
+            for index, geom in enumerate(fitted_lines):
+                if geom.is_empty or geom.length <= 0:
+                    continue
+                shapes.append(
+                    ShapeGeometry(
+                        geometry=geom,
+                        brightness=_rgb_to_brightness(rgb),
+                        stroke_width=0.0,
+                        color=rgb,
+                        toolpath_group=transformed_lines[min(index, len(transformed_lines) - 1)][0] if transformed_lines else None,
+                    )
+                )
     return shapes
 
 

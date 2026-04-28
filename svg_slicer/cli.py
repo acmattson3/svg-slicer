@@ -602,6 +602,7 @@ def write_toolpaths_to_gcode(
     *,
     progress_update: Optional[ProgressCallback] = None,
     verbose_gcode: bool = False,
+    write_in_order: bool = False,
 ) -> GcodeWriteResult:
     _notify(progress_update, "Preparing G-code generator…")
     toolpath_list = list(toolpaths)
@@ -624,7 +625,11 @@ def write_toolpaths_to_gcode(
             generator.emit_comment(
                 f"COLOR {index}/{total_groups}: {color} ({total_length:.1f} mm of drawing)"
             )
-            generator.draw_toolpaths(group_paths, config.printer.feedrates)
+            generator.draw_toolpaths(
+                group_paths,
+                config.printer.feedrates,
+                optimize_order=not write_in_order,
+            )
             if index < total_groups:
                 generator.emit_comment("Filament change before next color")
                 pause_commands = config.printer.pause_gcode or ["M600"]
@@ -633,7 +638,11 @@ def write_toolpaths_to_gcode(
     elif config.printer.color_mode:
         generator.emit_comment("No non-white toolpaths after palette assignment.")
     else:
-        generator.draw_toolpaths(toolpath_list, config.printer.feedrates)
+        generator.draw_toolpaths(
+            toolpath_list,
+            config.printer.feedrates,
+            optimize_order=not write_in_order,
+        )
 
     estimated_text = generator.formatted_elapsed_time()
     generator.emit_comment(f"Estimated plot time: {estimated_text}")
@@ -715,6 +724,7 @@ def slice_svg_to_gcode(
     force_hershey_text: bool = False,
     rotation_degrees: float = 0.0,
     verbose_gcode: bool = False,
+    write_in_order: bool = False,
 ) -> None:
     shapes = parse_artwork(
         artwork_path,
@@ -734,7 +744,13 @@ def slice_svg_to_gcode(
     else:
         logger.info("Applied artwork scale factor %.3f", applied_scale)
 
-    write_toolpaths_to_gcode(toolpaths, output_path, config, verbose_gcode=verbose_gcode)
+    write_toolpaths_to_gcode(
+        toolpaths,
+        output_path,
+        config,
+        verbose_gcode=verbose_gcode,
+        write_in_order=write_in_order,
+    )
 
     if preview or preview_file:
         polylines = [toolpath.points for toolpath in toolpaths]
@@ -834,6 +850,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Add detailed comments to the generated G-code for debugging toolpath ordering and glide/lift decisions.",
     )
+    parser.add_argument(
+        "--write-in-order",
+        action="store_true",
+        help="Write toolpaths in original artwork order instead of travel-optimized order.",
+    )
     parser.set_defaults(color_mode=None)
     return parser
 
@@ -878,6 +899,7 @@ def main(argv: List[str] | None = None) -> int:
             force_hershey_text=args.hershey,
             rotation_degrees=args.rotate,
             verbose_gcode=args.verbose_gcode,
+            write_in_order=args.write_in_order,
         )
     except Exception as exc:  # pragma: no cover - CLI surface
         logger.error("Failed to slice artwork: %s", exc)
