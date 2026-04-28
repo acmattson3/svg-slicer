@@ -359,6 +359,7 @@ def _mirror_toolpaths_for_printer(toolpaths: Iterable[Toolpath], printer: Printe
                 source_color=toolpath.source_color,
                 assigned_color=toolpath.assigned_color,
                 brightness=toolpath.brightness,
+                glide_group=toolpath.glide_group,
             )
         )
     return mirrored

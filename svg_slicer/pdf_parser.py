@@ -186,7 +186,13 @@ def _drawing_to_shapes(drawing, sampling: SamplingConfig, page_rect=None) -> Lis
 def _merge_pdf_stroke_shapes(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]:
     merged_shapes: List[ShapeGeometry] = []
     pending_lines: List[LineString] = []
-    pending_style: tuple[float | None, float, tuple[int, int, int] | None] | None = None
+    pending_style: tuple[
+        float | None,
+        float,
+        tuple[int, int, int] | None,
+        str | None,
+        str | None,
+    ] | None = None
 
     def flush_pending() -> None:
         nonlocal pending_lines, pending_style
@@ -194,7 +200,7 @@ def _merge_pdf_stroke_shapes(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]
             pending_lines = []
             pending_style = None
             return
-        stroke_width, brightness, color = pending_style
+        stroke_width, brightness, color, toolpath_tag, toolpath_group = pending_style
         for line in _merge_connected_ordered_lines(pending_lines, tolerance=_PDF_LINE_MERGE_TOLERANCE):
             if line.is_empty or line.length <= 0:
                 continue
@@ -204,6 +210,8 @@ def _merge_pdf_stroke_shapes(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]
                     brightness=brightness,
                     stroke_width=stroke_width,
                     color=color,
+                    toolpath_tag=toolpath_tag,
+                    toolpath_group=toolpath_group,
                 )
             )
         pending_lines = []
@@ -216,7 +224,13 @@ def _merge_pdf_stroke_shapes(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]
             and not shape.geometry.is_empty
             and shape.geometry.length > 0
         ):
-            style = (shape.stroke_width, shape.brightness, shape.color)
+            style = (
+                shape.stroke_width,
+                shape.brightness,
+                shape.color,
+                shape.toolpath_tag,
+                shape.toolpath_group,
+            )
             if pending_style is None or pending_style == style:
                 pending_style = style
                 pending_lines.append(shape.geometry)
