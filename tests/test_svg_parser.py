@@ -8,6 +8,7 @@ from shapely.geometry import LineString, Polygon
 from svg_slicer.config import PrinterConfig
 from svg_slicer.svg_parser import (
     ShapeGeometry,
+    _cached_hershey_glyph_data,
     _hershey_lines_for_text,
     _raster_pil_image_to_shape_geometries,
     fit_shapes_to_bed,
@@ -132,10 +133,33 @@ def test_parse_svg_hershey_text_produces_centerline_strokes(tmp_path: Path, slic
 def test_hershey_lines_merge_connected_segments() -> None:
     pytest.importorskip("HersheyFonts")
 
-    lines = _hershey_lines_for_text("O", x_base=0.0, y_base=0.0, font_size=12.0)
+    lines = _hershey_lines_for_text("W", x_base=0.0, y_base=0.0, font_size=12.0)
 
     assert lines
-    assert any(len(list(line.coords)) > 2 for line in lines)
+    assert len(lines) == 1
+    assert len(list(lines[0].coords)) > 4
+
+
+def test_hershey_lines_retrace_to_reduce_lifts_for_connected_glyphs() -> None:
+    pytest.importorskip("HersheyFonts")
+
+    for glyph in ["A", "n", "r", "t"]:
+        lines = _hershey_lines_for_text(glyph, x_base=0.0, y_base=0.0, font_size=12.0)
+        assert len(lines) == 1, glyph
+
+    lines = _hershey_lines_for_text("i", x_base=0.0, y_base=0.0, font_size=12.0)
+    assert len(lines) == 2
+
+
+def test_hershey_glyph_data_cache_reuses_repeated_letters() -> None:
+    pytest.importorskip("HersheyFonts")
+    _cached_hershey_glyph_data.cache_clear()
+
+    _hershey_lines_for_text("BANANA", x_base=0.0, y_base=0.0, font_size=12.0)
+
+    cache_info = _cached_hershey_glyph_data.cache_info()
+    assert cache_info.hits >= 2
+    assert cache_info.currsize >= 3
 
 
 def test_parse_svg_missing_font_falls_back_to_hershey(tmp_path: Path, slicer_config) -> None:

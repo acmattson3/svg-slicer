@@ -168,7 +168,7 @@ class LoadedModel:
         translate_y = offset_y + (self.position[1] if include_position else 0.0)
 
         transformed: List[ShapeGeometry] = []
-        for geom, brightness, stroke_width, color, centerline_geometry, toolpath_tag in staged or []:
+        for geom, brightness, stroke_width, color, centerline_geometry, toolpath_tag, toolpath_group in staged or []:
             if translate_x != 0.0 or translate_y != 0.0:
                 geom = shapely_translate(geom, xoff=translate_x, yoff=translate_y)
                 if centerline_geometry is not None:
@@ -185,6 +185,7 @@ class LoadedModel:
                     color=color,
                     centerline_geometry=centerline_geometry,
                     toolpath_tag=toolpath_tag,
+                    toolpath_group=toolpath_group,
                 )
             )
 
@@ -202,10 +203,10 @@ class LoadedModel:
         rotation: float,
         capture_shapes: bool,
     ) -> Tuple[
-        Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]], Optional[Any], Optional[str]]]],
+        Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]], Optional[Any], Optional[str], Optional[str]]]],
         Tuple[float, float, float, float],
     ]:
-        staged: Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]], Optional[Any], Optional[str]]]] = (
+        staged: Optional[List[Tuple[Any, float, Optional[float], Optional[tuple[int, int, int]], Optional[Any], Optional[str], Optional[str]]]] = (
             [] if capture_shapes else None
         )
 
@@ -254,6 +255,7 @@ class LoadedModel:
                         shape.color,
                         centerline_geometry,
                         shape.toolpath_tag,
+                        shape.toolpath_group,
                     )
                 )
 
@@ -897,6 +899,10 @@ class PrepareTab(QWidget):
         self.hershey_checkbox.setToolTip(
             "Render imported text as single-line Hershey strokes. PDF text always uses this path."
         )
+        self.verbose_gcode_checkbox = QCheckBox("Verbose G-code comments")
+        self.verbose_gcode_checkbox.setToolTip(
+            "Add detailed toolpath and glide/lift comments to generated G-code for debugging."
+        )
 
         self.file_list.itemSelectionChanged.connect(self._on_list_selection_changed)
 
@@ -974,7 +980,12 @@ class PrepareTab(QWidget):
         button_row.addWidget(self.add_button)
         button_row.addWidget(self.remove_button)
         controls.addLayout(button_row)
-        controls.addWidget(self.hershey_checkbox)
+
+        option_row = QHBoxLayout()
+        option_row.addWidget(self.hershey_checkbox)
+        option_row.addWidget(self.verbose_gcode_checkbox)
+        controls.addLayout(option_row)
+
         controls.addWidget(self.clear_button)
         controls.addSpacing(12)
 
@@ -1210,6 +1221,9 @@ class PrepareTab(QWidget):
 
     def hershey_text_enabled(self) -> bool:
         return self.hershey_checkbox.isChecked()
+
+    def verbose_gcode_enabled(self) -> bool:
+        return self.verbose_gcode_checkbox.isChecked()
 
 
 class SettingsTab(QWidget):
@@ -1855,6 +1869,7 @@ class MainWindow(QMainWindow):
                 color=shape.color,
                 centerline_geometry=shape.centerline_geometry,
                 toolpath_tag=shape.toolpath_tag,
+                toolpath_group=shape.toolpath_group,
             )
             for shape in shapes
         ]
@@ -2020,6 +2035,7 @@ class MainWindow(QMainWindow):
                     color=shape.color,
                     centerline_geometry=shape.centerline_geometry,
                     toolpath_tag=shape.toolpath_tag,
+                    toolpath_group=shape.toolpath_group,
                 )
                 for shape in shapes
             ]
@@ -2052,6 +2068,7 @@ class MainWindow(QMainWindow):
                     color=shape.color,
                     centerline_geometry=centerline_geometry,
                     toolpath_tag=shape.toolpath_tag,
+                    toolpath_group=shape.toolpath_group,
                 )
             )
         return normalized_shapes, width, height
@@ -2702,6 +2719,7 @@ class MainWindow(QMainWindow):
                 output_path,
                 self.config,
                 progress_update=update_progress,
+                verbose_gcode=self.prepare_tab.verbose_gcode_enabled(),
             )
         except Exception as exc:
             QMessageBox.critical(self, "Slice Failed", f"Could not generate G-code:\n{exc}")

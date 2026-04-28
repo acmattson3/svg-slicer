@@ -358,6 +358,37 @@ def test_write_toolpaths_to_gcode_color_mode_inserts_pause(tmp_path: Path, color
     assert len(result.color_order) == 2
 
 
+def test_write_toolpaths_to_gcode_color_mode_glides_within_color_group(tmp_path: Path, color_config_path: Path) -> None:
+    config = cli.load_config(color_config_path)
+    toolpaths = [
+        Toolpath(points=((0, 0), (5, 0)), source_color=(0, 0, 0)),
+        Toolpath(points=((5, 0), (10, 0)), source_color=(0, 0, 0)),
+    ]
+    output = tmp_path / "glide_color_mode.gcode"
+
+    cli.write_toolpaths_to_gcode(toolpaths, output, config)
+
+    text = output.read_text(encoding="utf-8")
+    assert text.count("G0 ") == 1
+    assert text.count("G1 Z1.200") == 1
+
+
+def test_write_toolpaths_to_gcode_verbose_flag_emits_debug_comments(tmp_path: Path, config_path: Path) -> None:
+    config = cli.load_config(config_path)
+    toolpaths = [
+        Toolpath(points=((0, 0), (1, 0))),
+        Toolpath(points=((1.5, 0), (2.5, 0))),
+    ]
+    output = tmp_path / "verbose.gcode"
+
+    cli.write_toolpaths_to_gcode(toolpaths, output, config, verbose_gcode=True)
+
+    text = output.read_text(encoding="utf-8")
+    assert "Verbose G-code comments enabled." in text
+    assert "TOOLPATH 1/2" in text
+    assert "GLIDE gap=0.500mm to toolpath 2/2" in text
+
+
 def test_write_toolpaths_to_gcode_color_mode_omits_white_paths(tmp_path: Path, color_config_path: Path) -> None:
     config = cli.load_config(color_config_path)
     config.printer.available_colors = ["#FFFFFF", "#000000"]
@@ -420,6 +451,7 @@ def test_main_respects_color_mode_override(monkeypatch, slicer_config, tmp_path:
         pdf_page=1,
         force_hershey_text=False,
         rotation_degrees=0.0,
+        verbose_gcode=False,
     ):
         called["svg"] = svg
         called["output"] = output
@@ -429,6 +461,7 @@ def test_main_respects_color_mode_override(monkeypatch, slicer_config, tmp_path:
         called["pdf_page"] = pdf_page
         called["force_hershey_text"] = force_hershey_text
         called["rotation_degrees"] = rotation_degrees
+        called["verbose_gcode"] = verbose_gcode
 
     monkeypatch.setattr(cli, "load_config", fake_load_config)
     monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)
@@ -464,12 +497,14 @@ def test_main_passes_manual_scale_to_slice(monkeypatch, slicer_config, tmp_path:
         pdf_page=1,
         force_hershey_text=False,
         rotation_degrees=0.0,
+        verbose_gcode=False,
     ):
         called["scale_factor"] = scale_factor
         called["alignment"] = alignment
         called["pdf_page"] = pdf_page
         called["force_hershey_text"] = force_hershey_text
         called["rotation_degrees"] = rotation_degrees
+        called["verbose_gcode"] = verbose_gcode
 
     monkeypatch.setattr(cli, "load_config", fake_load_config)
     monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)
@@ -502,10 +537,12 @@ def test_main_passes_pdf_page_and_hershey_to_slice(monkeypatch, slicer_config, t
         pdf_page=1,
         force_hershey_text=False,
         rotation_degrees=0.0,
+        verbose_gcode=False,
     ):
         called["pdf_page"] = pdf_page
         called["force_hershey_text"] = force_hershey_text
         called["rotation_degrees"] = rotation_degrees
+        called["verbose_gcode"] = verbose_gcode
 
     monkeypatch.setattr(cli, "load_config", fake_load_config)
     monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)
@@ -539,8 +576,10 @@ def test_main_passes_raster_spacing_override(monkeypatch, slicer_config, tmp_pat
         pdf_page=1,
         force_hershey_text=False,
         rotation_degrees=0.0,
+        verbose_gcode=False,
     ):
         called["raster_spacing"] = config.sampling.raster_sample_spacing
+        called["verbose_gcode"] = verbose_gcode
 
     monkeypatch.setattr(cli, "load_config", fake_load_config)
     monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)

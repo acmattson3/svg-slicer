@@ -15,7 +15,9 @@ from .svg_parser import (
     _fit_lines_to_bounds,
     _geometry_to_lines,
     _geometry_to_polygons,
+    _hershey_grouped_lines_for_text,
     _hershey_lines_for_text,
+    _merge_connected_ordered_lines,
     _normalize_hershey_text,
     _raster_pil_image_to_shape_geometries,
     _resolve_visibility,
@@ -23,6 +25,9 @@ from .svg_parser import (
 
 
 logger = logging.getLogger(__name__)
+
+_PAGE_BORDER_TOLERANCE = 0.5
+_PDF_LINE_MERGE_TOLERANCE = 1e-6
 
 
 def _pdf_rgb_to_tuple(value) -> tuple[int, int, int] | None:
@@ -43,6 +48,17 @@ def _rgb_to_brightness(rgb: tuple[int, int, int] | None) -> float:
         return 0.0
     r, g, b = rgb
     return max(0.0, min(1.0, (0.299 * r + 0.587 * g + 0.114 * b) / 255.0))
+
+
+def _rect_matches_page(rect, page_rect, *, tolerance: float = _PAGE_BORDER_TOLERANCE) -> bool:
+    if rect is None or page_rect is None:
+        return False
+    return (
+        abs(float(rect.x0) - float(page_rect.x0)) <= tolerance
+        and abs(float(rect.y0) - float(page_rect.y0)) <= tolerance
+        and abs(float(rect.x1) - float(page_rect.x1)) <= tolerance
+        and abs(float(rect.y1) - float(page_rect.y1)) <= tolerance
+    )
 
 
 def _sample_cubic(p0, p1, p2, p3, tolerance: float, detail_scale: float) -> List[Tuple[float, float]]:
@@ -73,7 +89,7 @@ def _sample_cubic(p0, p1, p2, p3, tolerance: float, detail_scale: float) -> List
     return [point(i / steps) for i in range(1, steps + 1)]
 
 
-def _drawing_items_to_lines(items, sampling: SamplingConfig) -> List[LineString]:
+def _drawing_items_to_lines(items, sampling: SamplingConfig, page_rect=None) -> List[LineString]:
     lines: List[LineString] = []
     current: List[Tuple[float, float]] = []
 
@@ -105,6 +121,9 @@ def _drawing_items_to_lines(items, sampling: SamplingConfig) -> List[LineString]
         elif op == "re":
             flush()
             rect = item[1]
+            if _rect_matches_page(rect, page_rect):
+                logger.debug("Skipping PDF rectangle that matches the full page bounds.")
+                continue
             coords = [
                 (float(rect.x0), float(rect.y0)),
                 (float(rect.x1), float(rect.y0)),
@@ -120,9 +139,9 @@ def _drawing_items_to_lines(items, sampling: SamplingConfig) -> List[LineString]
     return lines
 
 
-def _drawing_to_shapes(drawing, sampling: SamplingConfig) -> List[ShapeGeometry]:
+def _drawing_to_shapes(drawing, sampling: SamplingConfig, page_rect=None) -> List[ShapeGeometry]:
     shapes: List[ShapeGeometry] = []
-    lines = _drawing_items_to_lines(drawing.get("items", []), sampling)
+    lines = _drawing_items_to_lines(drawing.get("items", []), sampling, page_rect=page_rect)
     if not lines:
         return shapes
 
@@ -164,6 +183,51 @@ def _drawing_to_shapes(drawing, sampling: SamplingConfig) -> List[ShapeGeometry]
     return shapes
 
 
+def _merge_pdf_stroke_shapes(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]:
+    merged_shapes: List[ShapeGeometry] = []
+    pending_lines: List[LineString] = []
+    pending_style: tuple[float | None, float, tuple[int, int, int] | None] | None = None
+
+    def flush_pending() -> None:
+        nonlocal pending_lines, pending_style
+        if not pending_lines or pending_style is None:
+            pending_lines = []
+            pending_style = None
+            return
+        stroke_width, brightness, color = pending_style
+        for line in _merge_connected_ordered_lines(pending_lines, tolerance=_PDF_LINE_MERGE_TOLERANCE):
+            if line.is_empty or line.length <= 0:
+                continue
+            merged_shapes.append(
+                ShapeGeometry(
+                    geometry=line,
+                    brightness=brightness,
+                    stroke_width=stroke_width,
+                    color=color,
+                )
+            )
+        pending_lines = []
+        pending_style = None
+
+    for shape in shapes:
+        if (
+            shape.stroke_width is not None
+            and isinstance(shape.geometry, LineString)
+            and not shape.geometry.is_empty
+            and shape.geometry.length > 0
+        ):
+            style = (shape.stroke_width, shape.brightness, shape.color)
+            if pending_style is None or pending_style == style:
+                pending_style = style
+                pending_lines.append(shape.geometry)
+                continue
+        flush_pending()
+        merged_shapes.append(shape)
+
+    flush_pending()
+    return merged_shapes
+
+
 def _text_block_to_shapes(block) -> List[ShapeGeometry]:
     shapes: List[ShapeGeometry] = []
     for line in block.get("lines", []):
@@ -187,16 +251,17 @@ def _text_block_to_shapes(block) -> List[ShapeGeometry]:
         origin = line.get("origin") or first_span.get("origin") or (0.0, 0.0)
         size = float(first_span.get("size") or 12.0)
         rgb = _pdf_rgb_to_tuple(first_span.get("color")) or (0, 0, 0)
-        raw_lines = _hershey_lines_for_text(
+        grouped_raw_lines = _hershey_grouped_lines_for_text(
             text,
             x_base=0.0,
             y_base=0.0,
             font_size=size,
+            group_prefix=f"pdf-text:{origin[0]:.3f}:{origin[1]:.3f}:{text}",
         )
         transform = [cos_a, sin_a, -sin_a, cos_a, float(origin[0]), float(origin[1])]
         transformed_lines = [
-            shapely_affine_transform(hershey_line, transform)
-            for hershey_line in raw_lines
+            (group, shapely_affine_transform(hershey_line, transform))
+            for group, hershey_line in grouped_raw_lines
         ]
 
         span_bounds = [span.get("bbox") for span in spans if span.get("bbox") and len(span.get("bbox")) >= 4]
@@ -233,7 +298,8 @@ def _text_block_to_shapes(block) -> List[ShapeGeometry]:
                 max(float(bbox[2]) for bbox in span_bounds),
                 max(float(bbox[3]) for bbox in span_bounds),
             )
-        for geom in _fit_lines_to_bounds(transformed_lines, target_bounds):
+        fitted_lines = _fit_lines_to_bounds([line for _, line in transformed_lines], target_bounds)
+        for index, geom in enumerate(fitted_lines):
             if geom.is_empty or geom.length <= 0:
                 continue
             shapes.append(
@@ -242,6 +308,7 @@ def _text_block_to_shapes(block) -> List[ShapeGeometry]:
                     brightness=_rgb_to_brightness(rgb),
                     stroke_width=0.0,
                     color=rgb,
+                    toolpath_group=transformed_lines[min(index, len(transformed_lines) - 1)][0] if transformed_lines else None,
                 )
             )
     return shapes
@@ -291,7 +358,7 @@ def parse_pdf(
         shapes: List[ShapeGeometry] = []
 
         for drawing in page.get_drawings():
-            shapes.extend(_drawing_to_shapes(drawing, sampling))
+            shapes.extend(_drawing_to_shapes(drawing, sampling, page_rect=page.rect))
 
         text_dict = page.get_text("rawdict")
         for block in text_dict.get("blocks", []):
@@ -303,6 +370,6 @@ def parse_pdf(
             if block.get("type") == 1:
                 shapes.extend(_image_block_to_shapes(block, sampling))
 
-        return _resolve_visibility(shapes)
+        return _resolve_visibility(_merge_pdf_stroke_shapes(shapes))
     finally:
         doc.close()

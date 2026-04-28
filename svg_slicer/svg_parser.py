@@ -4,12 +4,13 @@ import logging
 import math
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import List, Sequence, Tuple
 
 from shapely.affinity import affine_transform as shapely_affine_transform
 from shapely.affinity import scale as shapely_scale
 from shapely.affinity import translate as shapely_translate
-from shapely.geometry import GeometryCollection, LineString, MultiLineString, Polygon
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 from svgelements import Arc, ClipPath, Color, Image, Line, Move, Path, SVG, Text
@@ -54,6 +55,7 @@ class ShapeGeometry:
     color: tuple[int, int, int] | None = None
     centerline_geometry: BaseGeometry | None = None
     toolpath_tag: str | None = None
+    toolpath_group: str | None = None
 
 
 def normalize_alignment(alignment: str | None) -> str:
@@ -415,9 +417,14 @@ def _merge_connected_ordered_lines(lines: List[LineString], *, tolerance: float 
             current_points = coords[:]
             continue
         last_x, last_y = current_points[-1]
-        next_x, next_y = coords[0]
-        if math.hypot(last_x - next_x, last_y - next_y) <= tolerance:
+        next_start_x, next_start_y = coords[0]
+        next_end_x, next_end_y = coords[-1]
+        if math.hypot(last_x - next_start_x, last_y - next_start_y) <= tolerance:
             current_points.extend(coords[1:])
+            continue
+        if math.hypot(last_x - next_end_x, last_y - next_end_y) <= tolerance:
+            reversed_coords = list(reversed(coords))
+            current_points.extend(reversed_coords[1:])
             continue
         flush_current()
         current_points = coords[:]
@@ -426,8 +433,285 @@ def _merge_connected_ordered_lines(lines: List[LineString], *, tolerance: float 
     return merged
 
 
+def _point_on_segment(
+    point: Tuple[float, float],
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+    *,
+    tolerance: float,
+) -> Tuple[bool, Tuple[float, float], float]:
+    px, py = point
+    x1, y1 = start
+    x2, y2 = end
+    dx = x2 - x1
+    dy = y2 - y1
+    seg_len_sq = dx * dx + dy * dy
+    if seg_len_sq <= tolerance * tolerance:
+        dist = math.hypot(px - x1, py - y1)
+        return dist <= tolerance, (x1, y1), dist
+    t = ((px - x1) * dx + (py - y1) * dy) / seg_len_sq
+    if t < -1e-9 or t > 1.0 + 1e-9:
+        return False, (0.0, 0.0), math.inf
+    t = min(max(t, 0.0), 1.0)
+    proj = (x1 + t * dx, y1 + t * dy)
+    dist = math.hypot(px - proj[0], py - proj[1])
+    return dist <= tolerance, proj, dist
+
+
+def _traceback_path_to_point(
+    current_points: List[Tuple[float, float]],
+    target: Tuple[float, float],
+    *,
+    tolerance: float,
+) -> Tuple[List[Tuple[float, float]], float] | None:
+    if len(current_points) < 2:
+        return None
+
+    reverse_extension: List[Tuple[float, float]] = []
+    retrace_length = 0.0
+    for index in range(len(current_points) - 1, 0, -1):
+        seg_end = current_points[index]
+        seg_start = current_points[index - 1]
+        matches, projected, _ = _point_on_segment(target, seg_start, seg_end, tolerance=tolerance)
+        if matches:
+            if math.hypot(seg_end[0] - projected[0], seg_end[1] - projected[1]) > tolerance:
+                reverse_extension.append(projected)
+                retrace_length += math.hypot(seg_end[0] - projected[0], seg_end[1] - projected[1])
+            return reverse_extension, retrace_length
+        reverse_extension.append(seg_start)
+        retrace_length += math.hypot(seg_end[0] - seg_start[0], seg_end[1] - seg_start[1])
+    return None
+
+
+def _intersection_points_on_line(
+    current_points: List[Tuple[float, float]],
+    line_points: List[Tuple[float, float]],
+    *,
+    tolerance: float,
+) -> List[Tuple[float, float]]:
+    current_line = LineString(current_points)
+    candidate_line = LineString(line_points)
+    intersection = current_line.intersection(candidate_line)
+    points: List[Tuple[float, float]] = []
+
+    def collect(geometry) -> None:  # type: ignore[no-untyped-def]
+        if geometry.is_empty:
+            return
+        if isinstance(geometry, Point):
+            points.append((float(geometry.x), float(geometry.y)))
+            return
+        if isinstance(geometry, LineString):
+            coords = list(geometry.coords)
+            if coords:
+                points.append((float(coords[0][0]), float(coords[0][1])))
+                points.append((float(coords[-1][0]), float(coords[-1][1])))
+            return
+        if isinstance(geometry, (MultiLineString, GeometryCollection)):
+            for part in geometry.geoms:
+                collect(part)
+
+    collect(intersection)
+
+    unique: List[Tuple[float, float]] = []
+    for point in points:
+        if any(math.hypot(point[0] - other[0], point[1] - other[1]) <= tolerance for other in unique):
+            continue
+        unique.append(point)
+    return unique
+
+
+def _split_polyline_at_point(
+    line_points: List[Tuple[float, float]],
+    point: Tuple[float, float],
+    *,
+    tolerance: float,
+) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]] | None:
+    for index, coord in enumerate(line_points):
+        if math.hypot(coord[0] - point[0], coord[1] - point[1]) <= tolerance:
+            return list(reversed(line_points[: index + 1])), line_points[index:]
+
+    for index in range(len(line_points) - 1):
+        start = line_points[index]
+        end = line_points[index + 1]
+        matches, projected, _ = _point_on_segment(point, start, end, tolerance=tolerance)
+        if not matches:
+            continue
+        expanded = line_points[: index + 1] + [projected] + line_points[index + 1 :]
+        return list(reversed(expanded[: index + 2])), expanded[index + 1 :]
+    return None
+
+
+def _cover_line_from_attachment(
+    line_points: List[Tuple[float, float]],
+    attach_point: Tuple[float, float],
+    *,
+    tolerance: float,
+) -> List[Tuple[float, float]] | None:
+    split = _split_polyline_at_point(line_points, attach_point, tolerance=tolerance)
+    if split is None:
+        return None
+    to_start, to_end = split
+
+    start_len = sum(
+        math.hypot(to_start[i + 1][0] - to_start[i][0], to_start[i + 1][1] - to_start[i][1])
+        for i in range(len(to_start) - 1)
+    )
+    end_len = sum(
+        math.hypot(to_end[i + 1][0] - to_end[i][0], to_end[i + 1][1] - to_end[i][1])
+        for i in range(len(to_end) - 1)
+    )
+
+    first, second = (to_start, to_end) if start_len <= end_len else (to_end, to_start)
+    return first + list(reversed(first[:-1])) + second[1:]
+
+
+def _attach_line_by_retrace(
+    current_points: List[Tuple[float, float]],
+    line_points: List[Tuple[float, float]],
+    *,
+    tolerance: float,
+) -> Tuple[List[Tuple[float, float]], float] | None:
+    if len(line_points) < 2:
+        return None
+
+    candidates: List[Tuple[float, List[Tuple[float, float]]]] = []
+    for attach_start in (True, False):
+        ordered = line_points if attach_start else list(reversed(line_points))
+        retrace = _traceback_path_to_point(current_points, ordered[0], tolerance=tolerance)
+        if retrace is None:
+            continue
+        retrace_points, retrace_length = retrace
+        extension = retrace_points + ordered[1:]
+        candidates.append((retrace_length, extension))
+
+    if not candidates:
+        for attach_point in _intersection_points_on_line(current_points, line_points, tolerance=tolerance):
+            retrace = _traceback_path_to_point(current_points, attach_point, tolerance=tolerance)
+            if retrace is None:
+                continue
+            retrace_points, retrace_length = retrace
+            covered = _cover_line_from_attachment(line_points, attach_point, tolerance=tolerance)
+            if covered is None or len(covered) < 2:
+                continue
+            extension = retrace_points + covered[1:]
+            candidates.append((retrace_length, extension))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], len(item[1])))
+    return candidates[0][1], candidates[0][0]
+
+
+def _attachment_score(
+    candidate: List[Tuple[float, float]],
+    others: List[List[Tuple[float, float]]],
+    *,
+    tolerance: float,
+) -> int:
+    if len(candidate) < 2:
+        return 0
+    score = 0
+    for other in others:
+        if len(other) < 2:
+            continue
+        for endpoint in (other[0], other[-1]):
+            if _traceback_path_to_point(candidate, endpoint, tolerance=tolerance) is not None:
+                score += 1
+                break
+    return score
+
+
+def _optimize_retrace_connected_lines(
+    lines: List[LineString],
+    *,
+    tolerance: float = 1e-9,
+) -> List[LineString]:
+    remaining = [
+        [(float(x), float(y)) for x, y in line.coords]
+        for line in lines
+        if not line.is_empty and len(line.coords) >= 2
+    ]
+    optimized: List[LineString] = []
+
+    while remaining:
+        seed_index = max(
+            range(len(remaining)),
+            key=lambda idx: (
+                _attachment_score(remaining[idx], remaining[:idx] + remaining[idx + 1 :], tolerance=tolerance),
+                len(remaining[idx]),
+            ),
+        )
+        current = remaining.pop(seed_index)
+
+        while remaining:
+            best_index = None
+            best_extension = None
+            best_retrace = math.inf
+            for idx, candidate in enumerate(remaining):
+                attached = _attach_line_by_retrace(current, candidate, tolerance=tolerance)
+                if attached is None:
+                    continue
+                extension, retrace_length = attached
+                if retrace_length < best_retrace - tolerance:
+                    best_index = idx
+                    best_extension = extension
+                    best_retrace = retrace_length
+            if best_index is None or best_extension is None:
+                break
+            current.extend(best_extension)
+            remaining.pop(best_index)
+
+        optimized.append(LineString(current))
+
+    return optimized
+
+
 def _normalize_hershey_text(text_content: str) -> str:
     return _WHITESPACE_RE.sub(" ", text_content).strip()
+
+
+@lru_cache(maxsize=512)
+def _cached_hershey_glyph_data(
+    character: str,
+    font_size: float,
+    font_name: str = "rowmans",
+) -> Tuple[Tuple[Tuple[Tuple[float, float], ...], ...], float]:
+    from HersheyFonts import HersheyFonts
+
+    font = HersheyFonts()
+    font.load_default_font(font_name)
+    font.normalize_rendering(max(font_size, 1e-6))
+
+    glyphs = list(font.glyphs_for_text(character))
+    if not glyphs:
+        return tuple(), 0.0
+
+    glyph = glyphs[0]
+    scale_x = float(font.render_options.get("scalex", 1.0))
+    advance_x = float(glyph.char_width) * scale_x
+
+    line_segments: List[LineString] = []
+    for start, end in font.lines_for_text(character):
+        line = LineString(
+            [
+                (float(start[0]), float(start[1])),
+                (float(end[0]), float(end[1])),
+            ]
+        )
+        if not line.is_empty and line.length > 0:
+            line_segments.append(line)
+
+    merged = _merge_connected_ordered_lines(line_segments)
+    merged = _optimize_retrace_connected_lines(
+        merged,
+        tolerance=max(abs(scale_x) * 0.5, 1e-6),
+    )
+    merged_coords = tuple(
+        tuple((float(x), float(y)) for x, y in line.coords)
+        for line in merged
+        if not line.is_empty and len(line.coords) >= 2
+    )
+    return merged_coords, advance_x
 
 
 def _text_to_polygons(
@@ -548,6 +832,24 @@ def _hershey_lines_for_text(
     font_size: float,
     matrix=None,
 ) -> List[LineString]:
+    return [line for _, line in _hershey_grouped_lines_for_text(
+        text_content,
+        x_base=x_base,
+        y_base=y_base,
+        font_size=font_size,
+        matrix=matrix,
+    )]
+
+
+def _hershey_grouped_lines_for_text(
+    text_content: str,
+    *,
+    x_base: float,
+    y_base: float,
+    font_size: float,
+    matrix=None,
+    group_prefix: str = "hershey",
+) -> List[Tuple[str, LineString]]:
     text_content = _normalize_hershey_text(text_content)
     if not text_content:
         return []
@@ -559,26 +861,31 @@ def _hershey_lines_for_text(
 
     try:
         font = HersheyFonts()
-        font.load_default_font("rowmans")
+        font_name = "rowmans"
+        font.load_default_font(font_name)
         font.normalize_rendering(max(font_size, 1e-6))
-        raw_lines = list(font.lines_for_text(text_content))
     except Exception as exc:  # pragma: no cover - defensive for bad glyph data
         logger.debug("Unable to render Hershey text '%s': %s", text_content, exc)
         return []
 
-    lines: List[LineString] = []
-    for start, end in raw_lines:
-        line = LineString(
-            [
-                (x_base + float(start[0]), y_base - float(start[1])),
-                (x_base + float(end[0]), y_base - float(end[1])),
-            ]
-        )
-        if matrix is not None:
-            line = shapely_affine_transform(line, _matrix_to_affine_params(matrix))
-        if not line.is_empty and line.length > 0:
-            lines.append(line)
-    return _merge_connected_ordered_lines(lines)
+    lines: List[Tuple[str, LineString]] = []
+    current_x = 0.0
+    for character_index, character in enumerate(text_content):
+        glyph_lines, advance_x = _cached_hershey_glyph_data(character, max(font_size, 1e-6), font_name)
+        glyph_group = f"{group_prefix}:{character_index}"
+        for glyph_line in glyph_lines:
+            line = LineString(
+                [
+                    (x_base + current_x + float(px), y_base - float(py))
+                    for px, py in glyph_line
+                ]
+            )
+            if matrix is not None:
+                line = shapely_affine_transform(line, _matrix_to_affine_params(matrix))
+            if not line.is_empty and line.length > 0:
+                lines.append((glyph_group, line))
+        current_x += advance_x
+    return lines
 
 
 def _text_to_hershey_lines(element: Text) -> List[LineString]:
@@ -721,6 +1028,7 @@ def _resolve_visibility(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]:
                         color=shape.color,
                         centerline_geometry=shape.centerline_geometry,
                         toolpath_tag=shape.toolpath_tag,
+                        toolpath_group=shape.toolpath_group,
                     )
                 )
             continue
@@ -744,6 +1052,7 @@ def _resolve_visibility(shapes: List[ShapeGeometry]) -> List[ShapeGeometry]:
                         else None
                     ),
                     toolpath_tag=shape.toolpath_tag,
+                    toolpath_group=shape.toolpath_group,
                 )
             )
             polys_for_union.append(polygon)
@@ -1013,34 +1322,52 @@ def parse_svg(
                 target_bounds = _combined_bounds(
                     _text_to_polygons(element, tolerance, text_override=normalized_text)
                 )
-                lines = _fit_lines_to_bounds(_text_to_hershey_lines(element), target_bounds)
+                grouped_lines = _hershey_grouped_lines_for_text(
+                    str(getattr(element, "text", "") or ""),
+                    x_base=_value_to_float(getattr(element, "x", 0.0)) + _value_to_float(getattr(element, "dx", 0.0)),
+                    y_base=_value_to_float(getattr(element, "y", 0.0)) + _value_to_float(getattr(element, "dy", 0.0)),
+                    font_size=text_font_size,
+                    matrix=getattr(element, "transform", None),
+                    group_prefix=f"svg-text:{id(element)}",
+                )
+                lines = _fit_lines_to_bounds([line for _, line in grouped_lines], target_bounds)
                 lines = _apply_clip_to_lines(lines, clip_geom)
                 if lines:
                     brightness = _color_to_brightness(fill_color)
                     rgb = _color_to_rgb(fill_color)
-                    for line in lines:
+                    for index, line in enumerate(lines):
                         shapes.append(
                             ShapeGeometry(
                                 geometry=line,
                                 brightness=brightness,
                                 stroke_width=0.0,
                                 color=rgb,
+                                toolpath_group=grouped_lines[min(index, len(grouped_lines) - 1)][0] if grouped_lines else None,
                             )
                         )
                 continue
             fill_sources = _text_to_polygons(element, tolerance)
             if has_visible_fill and not fill_sources:
-                lines = _apply_clip_to_lines(_text_to_hershey_lines(element), clip_geom)
+                grouped_lines = _hershey_grouped_lines_for_text(
+                    str(getattr(element, "text", "") or ""),
+                    x_base=_value_to_float(getattr(element, "x", 0.0)) + _value_to_float(getattr(element, "dx", 0.0)),
+                    y_base=_value_to_float(getattr(element, "y", 0.0)) + _value_to_float(getattr(element, "dy", 0.0)),
+                    font_size=text_font_size,
+                    matrix=getattr(element, "transform", None),
+                    group_prefix=f"svg-text:{id(element)}",
+                )
+                lines = _apply_clip_to_lines([line for _, line in grouped_lines], clip_geom)
                 if lines:
                     brightness = _color_to_brightness(fill_color)
                     rgb = _color_to_rgb(fill_color)
-                    for line in lines:
+                    for index, line in enumerate(lines):
                         shapes.append(
                             ShapeGeometry(
                                 geometry=line,
                                 brightness=brightness,
                                 stroke_width=0.0,
                                 color=rgb,
+                                toolpath_group=grouped_lines[min(index, len(grouped_lines) - 1)][0] if grouped_lines else None,
                             )
                         )
                 continue
@@ -1068,13 +1395,14 @@ def parse_svg(
                     if polygon.is_empty or polygon.area <= 0:
                         continue
                     shapes.append(
-                        ShapeGeometry(
-                            geometry=polygon,
-                            brightness=brightness,
-                            stroke_width=None,
-                            color=rgb,
-                        )
-                    )
+                ShapeGeometry(
+                    geometry=polygon,
+                    brightness=brightness,
+                    stroke_width=None,
+                    color=rgb,
+                    toolpath_group=None,
+                )
+            )
 
         stroke_color = getattr(element, "stroke", None)
         stroke_width = getattr(element, "stroke_width", None)
@@ -1121,6 +1449,7 @@ def parse_svg(
                                         brightness=brightness,
                                         stroke_width=stroke_w,
                                         color=rgb,
+                                        toolpath_group=None,
                                     )
                                 )
                             continue
@@ -1233,15 +1562,16 @@ def _place_shapes_with_bounds(
             )
         stroke_width = None if shape.stroke_width is None else shape.stroke_width * scale_factor
         translated_shapes.append(
-            ShapeGeometry(
-                geometry=geom,
-                brightness=shape.brightness,
-                stroke_width=stroke_width,
-                color=shape.color,
-                centerline_geometry=centerline_geometry,
-                toolpath_tag=shape.toolpath_tag,
+                ShapeGeometry(
+                    geometry=geom,
+                    brightness=shape.brightness,
+                    stroke_width=stroke_width,
+                    color=shape.color,
+                    centerline_geometry=centerline_geometry,
+                    toolpath_tag=shape.toolpath_tag,
+                    toolpath_group=shape.toolpath_group,
+                )
             )
-        )
 
     return translated_shapes, scale_factor
 

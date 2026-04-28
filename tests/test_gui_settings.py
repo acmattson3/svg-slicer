@@ -29,3 +29,13 @@ def test_config_to_yaml_includes_raster_sampling(qapp, slicer_config) -> None:
     assert data["sampling"]["raster_sample_spacing_mm"] == pytest.approx(0.9)
     assert data["sampling"]["raster_max_cells"] == 1234
     assert data["printer"]["glide_threshold_mm"] == pytest.approx(1.4)
+
+
+def test_prepare_tab_exposes_verbose_gcode_checkbox(qapp) -> None:
+    tab = gui.PrepareTab()
+
+    assert tab.verbose_gcode_enabled() is False
+
+    tab.verbose_gcode_checkbox.setChecked(True)
+
+    assert tab.verbose_gcode_enabled() is True

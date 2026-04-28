@@ -172,6 +172,7 @@ def rotate_shapes(shapes: Iterable[ShapeGeometry], degrees: float) -> List[Shape
                 color=shape.color,
                 centerline_geometry=centerline_geometry,
                 toolpath_tag=shape.toolpath_tag,
+                toolpath_group=shape.toolpath_group,
             )
         )
     return rotated
@@ -299,6 +300,7 @@ def _build_stroke_toolpaths(shape: ShapeGeometry, config: SlicerConfig) -> List[
             tag=shape.toolpath_tag or "stroke",
             source_color=shape.color,
             brightness=shape.brightness,
+            glide_group=shape.toolpath_group,
         )
     loops = _generate_perimeter_loops(
         polygon=shape.geometry,
@@ -306,7 +308,13 @@ def _build_stroke_toolpaths(shape: ShapeGeometry, config: SlicerConfig) -> List[
         target_width=shape.stroke_width,
         tolerance=config.sampling.outline_simplify_tolerance,
     )
-    return toolpaths_from_polylines(loops, tag="outline", source_color=shape.color, brightness=shape.brightness)
+    return toolpaths_from_polylines(
+        loops,
+        tag="outline",
+        source_color=shape.color,
+        brightness=shape.brightness,
+        glide_group=shape.toolpath_group,
+    )
 
 
 def _build_toolpaths(
@@ -593,11 +601,14 @@ def write_toolpaths_to_gcode(
     config: SlicerConfig,
     *,
     progress_update: Optional[ProgressCallback] = None,
+    verbose_gcode: bool = False,
 ) -> GcodeWriteResult:
     _notify(progress_update, "Preparing G-code generator…")
     toolpath_list = list(toolpaths)
-    generator = GcodeGenerator(config.printer)
+    generator = GcodeGenerator(config.printer, verbose_comments=verbose_gcode)
     generator.emit_header()
+    if verbose_gcode:
+        generator.emit_comment("Verbose G-code comments enabled.")
 
     _notify(progress_update, "Planning color sequence…")
     color_plan = _plan_color_sequence(toolpath_list, config)
@@ -613,8 +624,7 @@ def write_toolpaths_to_gcode(
             generator.emit_comment(
                 f"COLOR {index}/{total_groups}: {color} ({total_length:.1f} mm of drawing)"
             )
-            for path in group_paths:
-                generator.draw_single_toolpath(path, config.printer.feedrates)
+            generator.draw_toolpaths(group_paths, config.printer.feedrates)
             if index < total_groups:
                 generator.emit_comment("Filament change before next color")
                 pause_commands = config.printer.pause_gcode or ["M600"]
@@ -704,6 +714,7 @@ def slice_svg_to_gcode(
     pdf_page: int = 1,
     force_hershey_text: bool = False,
     rotation_degrees: float = 0.0,
+    verbose_gcode: bool = False,
 ) -> None:
     shapes = parse_artwork(
         artwork_path,
@@ -723,7 +734,7 @@ def slice_svg_to_gcode(
     else:
         logger.info("Applied artwork scale factor %.3f", applied_scale)
 
-    write_toolpaths_to_gcode(toolpaths, output_path, config)
+    write_toolpaths_to_gcode(toolpaths, output_path, config, verbose_gcode=verbose_gcode)
 
     if preview or preview_file:
         polylines = [toolpath.points for toolpath in toolpaths]
@@ -818,6 +829,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Override the configuration to force black and white mode.",
     )
+    parser.add_argument(
+        "--verbose-gcode",
+        action="store_true",
+        help="Add detailed comments to the generated G-code for debugging toolpath ordering and glide/lift decisions.",
+    )
     parser.set_defaults(color_mode=None)
     return parser
 
@@ -861,6 +877,7 @@ def main(argv: List[str] | None = None) -> int:
             pdf_page=args.pdf_page,
             force_hershey_text=args.hershey,
             rotation_degrees=args.rotate,
+            verbose_gcode=args.verbose_gcode,
         )
     except Exception as exc:  # pragma: no cover - CLI surface
         logger.error("Failed to slice artwork: %s", exc)

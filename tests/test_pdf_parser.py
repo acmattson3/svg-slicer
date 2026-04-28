@@ -46,6 +46,53 @@ def test_parse_pdf_uses_selected_page(tmp_path: Path, slicer_config) -> None:
     assert maxy == pytest.approx(80.0)
 
 
+def test_parse_pdf_ignores_full_page_border_rectangle(tmp_path: Path, slicer_config) -> None:
+    fitz = pytest.importorskip("fitz")
+
+    path = tmp_path / "page_border.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=100, height=100)
+    page.draw_rect(page.rect, color=(0, 0, 0), width=1)
+    page.draw_rect(fitz.Rect(10, 10, 20, 20), fill=(0, 0, 0))
+    doc.save(str(path))
+    doc.close()
+
+    shapes = parse_artwork(path, slicer_config.sampling, pdf_page=1)
+
+    assert shapes
+    bounds = [shape.geometry.bounds for shape in shapes]
+    minx = min(bound[0] for bound in bounds)
+    miny = min(bound[1] for bound in bounds)
+    maxx = max(bound[2] for bound in bounds)
+    maxy = max(bound[3] for bound in bounds)
+    assert minx >= 10.0 - 1e-6
+    assert miny >= 10.0 - 1e-6
+    assert maxx <= 20.0 + 1e-6
+    assert maxy <= 20.0 + 1e-6
+
+
+def test_parse_pdf_merges_adjacent_stroke_segments(tmp_path: Path, slicer_config) -> None:
+    fitz = pytest.importorskip("fitz")
+
+    path = tmp_path / "segmented_line.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=160, height=60)
+    for start_x in range(10, 110, 10):
+        page.draw_line((start_x, 20), (start_x + 10, 20), color=(0, 0, 0), width=1)
+    doc.save(str(path))
+    doc.close()
+
+    shapes = parse_artwork(path, slicer_config.sampling, pdf_page=1)
+    line_shapes = [shape for shape in shapes if isinstance(shape.geometry, LineString)]
+
+    assert len(line_shapes) == 1
+    minx, miny, maxx, maxy = line_shapes[0].geometry.bounds
+    assert minx == pytest.approx(10.0)
+    assert miny == pytest.approx(20.0)
+    assert maxx == pytest.approx(110.0)
+    assert maxy == pytest.approx(20.0)
+
+
 def test_parse_pdf_hershey_text_fits_span_bounds(tmp_path: Path, slicer_config) -> None:
     fitz = pytest.importorskip("fitz")
 
