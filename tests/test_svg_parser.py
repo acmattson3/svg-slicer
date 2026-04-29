@@ -178,8 +178,8 @@ def test_hershey_grouped_lines_split_disconnected_glyph_parts() -> None:
 def test_hershey_reports_superscript_and_diameter_symbol_as_unsupported() -> None:
     pytest.importorskip("HersheyFonts")
     assert _text_supported_by_hershey("³", 12.0) is True
-    assert _text_supported_by_hershey("Ø", 12.0) is False
-    assert _text_supported_by_hershey("ø", 12.0) is False
+    assert _text_supported_by_hershey("Ø", 12.0) is True
+    assert _text_supported_by_hershey("ø", 12.0) is True
 
 
 def test_parse_svg_missing_font_falls_back_to_hershey(tmp_path: Path, slicer_config) -> None:

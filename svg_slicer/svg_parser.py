@@ -57,6 +57,10 @@ _SUPERSCRIPT_BASE_MAP = {
     "⁸": "8",
     "⁹": "9",
 }
+_DIAMETER_BASE_MAP = {
+    "Ø": "O",
+    "ø": "o",
+}
 
 @dataclass
 class ShapeGeometry:
@@ -766,6 +770,23 @@ def _glyph_data_for_character(
                 for line in base_lines
             )
             return shifted, base_advance * scale
+
+    diameter_base = _DIAMETER_BASE_MAP.get(character)
+    if diameter_base is not None:
+        base_lines, base_advance = _cached_hershey_glyph_data(diameter_base, font_size, font_name)
+        if base_lines:
+            xs = [float(x) for line in base_lines for x, _ in line]
+            ys = [float(y) for line in base_lines for _, y in line]
+            if xs and ys:
+                minx, maxx = min(xs), max(xs)
+                miny, maxy = min(ys), max(ys)
+                inset_x = max((maxx - minx) * 0.12, font_size * 0.04)
+                inset_y = max((maxy - miny) * 0.12, font_size * 0.04)
+                slash = (
+                    (minx + inset_x, maxy - inset_y),
+                    (maxx - inset_x, miny + inset_y),
+                )
+                return base_lines + (slash,), base_advance
 
     return tuple(), 0.0
 
