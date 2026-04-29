@@ -1345,6 +1345,10 @@ class SettingsTab(QWidget):
         self.available_colors_edit.setPlaceholderText("#000000, #FF0000, #00FF00")
         self._set_wide(self.available_colors_edit)
         printer_form.addRow("Available colors", self.available_colors_edit)
+        self.available_color_names_edit = QLineEdit()
+        self.available_color_names_edit.setPlaceholderText("Black, Red, Green")
+        self._set_wide(self.available_color_names_edit)
+        printer_form.addRow("Color names", self.available_color_names_edit)
 
         self.start_gcode_edit = QPlainTextEdit()
         self.start_gcode_edit.setPlaceholderText("One G-code command per line")
@@ -1551,6 +1555,7 @@ class SettingsTab(QWidget):
         self.feedrate_z_spin.setValue(printer.feedrates.z_mm_s)
         self.color_mode_checkbox.setChecked(printer.color_mode)
         self.available_colors_edit.setText(", ".join(printer.available_colors))
+        self.available_color_names_edit.setText(", ".join(printer.available_color_names))
         self.start_gcode_edit.setPlainText("\n".join(printer.start_gcode))
         self.end_gcode_edit.setPlainText("\n".join(printer.end_gcode))
         self.pause_gcode_edit.setPlainText("\n".join(printer.pause_gcode))
@@ -1595,8 +1600,11 @@ class SettingsTab(QWidget):
 
         color_mode = self.color_mode_checkbox.isChecked()
         palette = self._parse_palette(self.available_colors_edit.text())
+        color_names = self._parse_color_names(self.available_color_names_edit.text())
         if color_mode and not palette:
             raise ValueError("Color mode requires at least one available color.")
+        if color_names and len(color_names) != len(palette):
+            raise ValueError("Color names must match the number of available colors.")
 
         pause_lines = [line for line in self.pause_gcode_edit.toPlainText().splitlines() if line.strip()]
         if not pause_lines:
@@ -1624,6 +1632,7 @@ class SettingsTab(QWidget):
             end_gcode=[line for line in self.end_gcode_edit.toPlainText().splitlines() if line.strip()],
             color_mode=color_mode,
             available_colors=palette,
+            available_color_names=color_names,
             pause_gcode=pause_lines,
             draw_command=self.draw_command_edit.text().strip() or None,
             lift_command=self.lift_command_edit.text().strip() or None,
@@ -1715,6 +1724,17 @@ class SettingsTab(QWidget):
                 raise ValueError(f"Invalid hex color '{chunk}'. Expected format like #RRGGBB.")
             entries.append(f"#{value.upper()}")
         return entries
+
+    @staticmethod
+    def _parse_color_names(text: str) -> List[str]:
+        stripped = text.replace("\n", ",")
+        names: List[str] = []
+        for chunk in stripped.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            names.append(chunk)
+        return names
 
     def _on_apply_clicked(self) -> None:
         try:
@@ -2919,6 +2939,7 @@ class MainWindow(QMainWindow):
             },
             "color_mode": config.printer.color_mode,
             "available_colors": list(config.printer.available_colors),
+            "available_color_names": list(config.printer.available_color_names),
             "pause_gcode": list(config.printer.pause_gcode),
         }
         if config.printer.draw_command:

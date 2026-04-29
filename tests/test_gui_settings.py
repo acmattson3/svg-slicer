@@ -44,6 +44,7 @@ def test_config_to_yaml_includes_raster_sampling(qapp, slicer_config) -> None:
     slicer_config.sampling.image_vector_blur_kernel = 5
     slicer_config.sampling.image_vector_max_pixels = 123456
     slicer_config.printer.glide_threshold = 1.4
+    slicer_config.printer.available_color_names = ["Black", "Red"]
 
     data = gui.MainWindow._config_to_yaml(slicer_config)
 
@@ -57,6 +58,7 @@ def test_config_to_yaml_includes_raster_sampling(qapp, slicer_config) -> None:
     assert data["sampling"]["image_vector_blur_kernel_px"] == 5
     assert data["sampling"]["image_vector_max_pixels"] == 123456
     assert data["printer"]["glide_threshold_mm"] == pytest.approx(1.4)
+    assert data["printer"]["available_color_names"] == ["Black", "Red"]
 
 
 def test_prepare_tab_exposes_verbose_gcode_checkbox(qapp) -> None:

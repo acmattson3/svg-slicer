@@ -665,6 +665,42 @@ def _plan_color_sequence(toolpaths: List[Toolpath], config: SlicerConfig) -> Col
     return ColorPlan(ordered_colors=ordered_colors, groups=groups, usage_by_color=usage)
 
 
+def _color_display_name(config: SlicerConfig, color: str) -> str:
+    try:
+        index = config.printer.available_colors.index(color)
+    except ValueError:
+        return color
+    if 0 <= index < len(config.printer.available_color_names):
+        name = config.printer.available_color_names[index].strip()
+        if name:
+            return name
+    return color
+
+
+def _format_pause_command(
+    command: str,
+    config: SlicerConfig,
+    *,
+    current_color: str,
+    next_color: str,
+    index: int,
+    total: int,
+) -> str:
+    context = {
+        "current_color": current_color,
+        "current_color_name": _color_display_name(config, current_color),
+        "next_color": next_color,
+        "next_color_name": _color_display_name(config, next_color),
+        "color_index": index,
+        "next_color_index": index + 1,
+        "total_colors": total,
+    }
+    try:
+        return command.format(**context)
+    except Exception:
+        return command
+
+
 def write_toolpaths_to_gcode(
     toolpaths: Iterable[Toolpath],
     output_path: Path,
@@ -703,8 +739,18 @@ def write_toolpaths_to_gcode(
             if index < total_groups:
                 generator.emit_comment("Filament change before next color")
                 pause_commands = config.printer.pause_gcode or ["M600"]
+                next_color = color_plan.groups[index][0]
                 for command in pause_commands:
-                    generator.emit_command(command)
+                    generator.emit_command(
+                        _format_pause_command(
+                            command,
+                            config,
+                            current_color=color,
+                            next_color=next_color,
+                            index=index,
+                            total=total_groups,
+                        )
+                    )
     elif config.printer.color_mode:
         generator.emit_comment("No non-white toolpaths after palette assignment.")
     else:

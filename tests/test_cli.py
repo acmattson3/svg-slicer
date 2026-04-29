@@ -424,6 +424,8 @@ def test_plan_color_sequence_skips_white_assigned_color(color_config_path: Path)
 
 def test_write_toolpaths_to_gcode_color_mode_inserts_pause(tmp_path: Path, color_config_path: Path) -> None:
     config = cli.load_config(color_config_path)
+    config.printer.available_color_names = ["Black", "Red"]
+    config.printer.pause_gcode = ["M0 Change to {next_color_name} ({next_color})"]
     toolpaths = [
         Toolpath(points=((0, 0), (5, 0)), source_color=(0, 0, 0)),
         Toolpath(points=((0, 0), (6, 0)), source_color=(255, 0, 0)),
@@ -435,7 +437,7 @@ def test_write_toolpaths_to_gcode_color_mode_inserts_pause(tmp_path: Path, color
     assert output.exists()
     text = output.read_text(encoding="utf-8")
     assert "COLOR ORDER" in text
-    assert "M600" in text
+    assert "M0 Change to Red (#FF0000)" in text
     assert result.line_count > 0
     assert len(result.color_order) == 2
 

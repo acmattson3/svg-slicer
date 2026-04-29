@@ -132,6 +132,18 @@ def test_load_config_empty_pause_gcode_defaults_to_m600(tmp_path: Path) -> None:
     assert cfg.printer.pause_gcode == ["M600"]
 
 
+def test_load_config_reads_color_names(tmp_path: Path) -> None:
+    data = _make_base_config()
+    data["printer"]["color_mode"] = True
+    data["printer"]["available_colors"] = ["#000000", "#FF0000"]
+    data["printer"]["available_color_names"] = ["Black", "Red"]
+    path = tmp_path / "color_names.yaml"
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    cfg = load_config(path)
+    assert cfg.printer.available_color_names == ["Black", "Red"]
+
+
 def test_load_config_perimeter_density_fallback_sets_count(tmp_path: Path) -> None:
     data = _make_base_config()
     data["perimeter"].pop("count", None)

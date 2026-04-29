@@ -13,7 +13,7 @@ printers:
     z_heights_mm:
       draw: 0.0
       travel: 1.5
-      raster_travel: 1.5
+      raster_travel: 1.0
     z_lift_height_mm: 1.5
     glide_threshold_mm: 2.5
     feedrates_mm_s:
@@ -33,12 +33,24 @@ printers:
       - "#292f7d" # Blue
       - "#69409c" # Purple
       - "#bf4e95" # Pink
+    available_color_names:
+      - "Black"
+      - "Red"
+      - "Orange"
+      - "Yellow"
+      - "Lime"
+      - "Green"
+      - "Turquoise"
+      - "Cyan"
+      - "Blue"
+      - "Purple"
+      - "Pink"
     pause_gcode:
       - "G91 ; relative positioning"
       - "G1 Z20 F600 ; lift pen safely"
       - "G90 ; absolute positioning"
       - "G1 X0.000 Y0.000 F10500 ; move to park for swap"
-      - "M0 Change pen and press to resume"
+      - "M0 Change pen to {next_color_name} ({next_color}) and press to resume"
     start_gcode:
       - G21 ; use millimeters
       - G90 ; absolute positioning

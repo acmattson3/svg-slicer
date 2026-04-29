@@ -46,6 +46,7 @@ class PrinterConfig:
     end_gcode: List[str]
     color_mode: bool = False
     available_colors: List[str] = field(default_factory=list)
+    available_color_names: List[str] = field(default_factory=list)
     pause_gcode: List[str] = field(default_factory=lambda: ["M600"])
     draw_command: str | None = None
     lift_command: str | None = None
@@ -242,6 +243,14 @@ def _parse_printer_config(printer_raw: Dict[str, Any], fallback_name: str | None
     available_colors = [_normalize_hex_color(entry) for entry in palette_raw]
     if color_mode and not available_colors:
         raise ConfigError("Color mode is enabled but 'available_colors' is empty.")
+    color_names_raw = printer_raw.get("available_color_names", [])
+    if color_names_raw is None:
+        color_names_raw = []
+    if not isinstance(color_names_raw, list):
+        raise ConfigError("'available_color_names' must be a list of strings.")
+    available_color_names = [str(entry).strip() for entry in color_names_raw]
+    if available_color_names and len(available_color_names) != len(available_colors):
+        raise ConfigError("'available_color_names' must match the length of 'available_colors'.")
 
     pause_gcode_raw = printer_raw.get("pause_gcode", ["M600"])
     if pause_gcode_raw is None:
@@ -274,6 +283,7 @@ def _parse_printer_config(printer_raw: Dict[str, Any], fallback_name: str | None
         travel_move_command=_optional_command(printer_raw, "travel_move_command"),
         color_mode=color_mode,
         available_colors=available_colors,
+        available_color_names=available_color_names,
         pause_gcode=pause_gcode,
     )
 
