@@ -12,7 +12,7 @@ Under the hood the slicer resolves fills, strokes, and text into geometry, appli
 - Black-and-white mode converts fills to grayscale, driving density-scaled cross-hatch infill with perimeter glides to minimise pen lifts while thick strokes receive dedicated outline passes.
 - Embedded raster images are converted into colour-aware alternating scanline passes, preserving vector artwork as vectors while plotting image regions as pen strokes.
 - Automatically tessellates SVG `<text>` via Matplotlib fonts, can replace text with Hershey single-line strokes, converts thick strokes into filled regions, and honours SVG z-order so upper shapes mask lower ones.
-- Imports PDF pages with a hybrid path: vector drawing operators remain vectors, PDF text becomes Hershey strokes, and embedded raster images are sampled with the existing raster sampling settings.
+- Imports PDF pages with a hybrid path: vector drawing operators remain vectors, PDF text uses Hershey single-line strokes when supported, unsupported PDF text characters fall back per-character so the rest of the line can stay Hershey-based, and embedded raster images are sampled with the existing raster sampling settings.
 - Optional Matplotlib preview renders only drawing moves; you can display it interactively or export a PNG for headless environments.
 - G-code output includes a motion-only time estimate and total line count so you can gauge run time before plotting.
 
@@ -72,7 +72,9 @@ python3 -m svg_slicer --config config.yaml
 - Provide `--printer-profile <name>` to open with a specific profile.
 - Drop SVG or PDF files onto the build plate or use **Add Artwork…**; each file is auto-fit to the printable area once on import.
 - For multi-page PDFs, choose one page to import when prompted. Layout files persist the selected page.
-- Enable **Use Hershey text strokes** before import to replace SVG text with single-line Hershey strokes. PDF text always uses Hershey strokes.
+- Enable **Use Hershey text strokes** before import to replace SVG text with single-line Hershey strokes. PDF text uses Hershey strokes when supported and falls back per unsupported character when needed.
+- Enable **Verbose G-code comments** to annotate the exported file with toolpath ordering plus glide/lift decisions.
+- Enable **Write in order** to preserve original artwork order instead of travel-optimizing the toolpath sequence.
 - Select a model to adjust scale (percent), rotation (degrees), and XY position; footprint width/height (mm) can be edited directly and translated into scale.
 - Use the mouse wheel over the build plate to zoom and right-click drag to pan.
 - Use **Edit → Undo** (`Ctrl+Z`) to revert arrangement edits (move, scale, rotation, import, duplicate, delete, clear, and layout load).
@@ -115,10 +117,12 @@ Common flags:
 
 - `--preview` opens an interactive Matplotlib window; `--preview-file` saves the image instead.
 - Use a PDF input the same way, adding `--pdf-page 2` to import a specific one-based page. The default is page 1.
-- `--hershey` renders imported text as Hershey single-line strokes. PDF text always uses this path.
+- `--hershey` renders imported text as Hershey single-line strokes. PDF text uses Hershey strokes when supported and falls back per unsupported character when needed.
 - `--scale auto` fits artwork to the printable area (default). Use `--scale none`, `--scale 1`, or another positive factor such as `--scale 0.5` to choose the artwork scale manually.
 - `--rotate <degrees>` rotates artwork counterclockwise around its center before scaling and placement.
 - `--raster-spacing <mm>` overrides the gap between raster scanlines for embedded images. The default comes from `sampling.raster_sample_spacing_mm`.
+- `--verbose-gcode` adds detailed toolpath, glide, and lift comments to the exported G-code for debugging.
+- `--write-in-order` preserves source order instead of travel-optimizing toolpaths, which can be useful when you want the drawing process to look closer to the original artwork order.
 - `--alignment <position>` places artwork inside the printable area. The default is `center`. Supported values are `top-left`, `top-middle`, `top-right`, `center-left`, `center`, `center-right`, `bottom-left`, `bottom-middle`, and `bottom-right`.
 - `--color-mode` or `--bw-mode` override the profile default for a single run.
 - `--log-level` adjusts verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`).
@@ -146,6 +150,6 @@ The current suite includes unit tests for configuration parsing, SVG/PDF parsing
 
 - Filled regions are converted into hatchable toolpaths. SVG strokes are traced as outlines by default, or can be drawn as centerlines with `plot_mode`.
 - Brightness mapping clamps infill density between `infill.min_density` and `infill.max_density`, enabling faint shading for light fills and solid hatching for dark regions.
-- Text glyphs are outlined with Matplotlib fonts by default for SVGs; `--hershey` / the GUI checkbox uses Hershey single-line strokes, and PDF text always uses Hershey strokes.
+- Text glyphs are outlined with Matplotlib fonts by default for SVGs; `--hershey` / the GUI checkbox uses Hershey single-line strokes. PDF text uses Hershey strokes when supported and falls back per unsupported character when needed.
 - Generated G-code assumes absolute coordinates in millimetres.
 - Preview rendering and exported toolpaths ignore travel moves so only actual drawing strokes appear.
