@@ -39,3 +39,13 @@ def test_prepare_tab_exposes_verbose_gcode_checkbox(qapp) -> None:
     tab.verbose_gcode_checkbox.setChecked(True)
 
     assert tab.verbose_gcode_enabled() is True
+
+
+def test_prepare_tab_exposes_write_in_order_checkbox(qapp) -> None:
+    tab = gui.PrepareTab()
+
+    assert tab.write_in_order_enabled() is False
+
+    tab.write_in_order_checkbox.setChecked(True)
+
+    assert tab.write_in_order_enabled() is True

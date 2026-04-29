@@ -904,6 +904,10 @@ class PrepareTab(QWidget):
         self.verbose_gcode_checkbox.setToolTip(
             "Add detailed toolpath and glide/lift comments to generated G-code for debugging."
         )
+        self.write_in_order_checkbox = QCheckBox("Write in order")
+        self.write_in_order_checkbox.setToolTip(
+            "Preserve original artwork order instead of travel-optimizing toolpath order."
+        )
 
         self.file_list.itemSelectionChanged.connect(self._on_list_selection_changed)
 
@@ -985,6 +989,7 @@ class PrepareTab(QWidget):
         option_row = QHBoxLayout()
         option_row.addWidget(self.hershey_checkbox)
         option_row.addWidget(self.verbose_gcode_checkbox)
+        option_row.addWidget(self.write_in_order_checkbox)
         controls.addLayout(option_row)
 
         controls.addWidget(self.clear_button)
@@ -1225,6 +1230,9 @@ class PrepareTab(QWidget):
 
     def verbose_gcode_enabled(self) -> bool:
         return self.verbose_gcode_checkbox.isChecked()
+
+    def write_in_order_enabled(self) -> bool:
+        return self.write_in_order_checkbox.isChecked()
 
 
 class SettingsTab(QWidget):
@@ -2721,6 +2729,7 @@ class MainWindow(QMainWindow):
                 self.config,
                 progress_update=update_progress,
                 verbose_gcode=self.prepare_tab.verbose_gcode_enabled(),
+                write_in_order=self.prepare_tab.write_in_order_enabled(),
             )
         except Exception as exc:
             QMessageBox.critical(self, "Slice Failed", f"Could not generate G-code:\n{exc}")
