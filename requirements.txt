@@ -7,3 +7,4 @@ shapely
 svgelements
 scipy
 Hershey-Fonts
+opencv-python

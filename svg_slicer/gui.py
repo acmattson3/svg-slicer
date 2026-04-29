@@ -77,6 +77,7 @@ _LOGGER = logging.getLogger(__name__)
 _MIN_FIELD_HEIGHT = 28
 _MAX_UNDO_STATES = 100
 _LAYOUT_FILE_VERSION = 1
+_SUPPORTED_ARTWORK_SUFFIXES = {".svg", ".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif", ".tif", ".tiff"}
 
 
 def _running_in_wsl() -> bool:
@@ -597,7 +598,7 @@ class BuildPlateView(QGraphicsView):
             line.setZValue(-3)
             y += grid_spacing
 
-        self._info_item = self._scene.addText("Drop SVG or PDF files onto the build plate")
+        self._info_item = self._scene.addText("Drop SVG, PDF, or image files onto the build plate")
         self._info_item.setTextWidth(max(rect.width() * 0.9, 1.0))
         self._info_item.setDefaultTextColor(QColor("#777777"))
         self._info_item.setZValue(5)
@@ -682,7 +683,7 @@ class BuildPlateView(QGraphicsView):
         if not mime.hasUrls():
             return False
         return any(
-            url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in {".svg", ".pdf"}
+            url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in _SUPPORTED_ARTWORK_SUFFIXES
             for url in mime.urls()
         )
 
@@ -705,7 +706,7 @@ class BuildPlateView(QGraphicsView):
         paths = [
             url.toLocalFile()
             for url in event.mimeData().urls()
-            if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in {".svg", ".pdf"}
+            if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in _SUPPORTED_ARTWORK_SUFFIXES
         ]
         if paths:
             self.svgDropped.emit(paths)
@@ -1417,6 +1418,25 @@ class SettingsTab(QWidget):
         self.outline_tolerance_spin = self._make_spin(0.001, 10.0, 0.01, decimals=4)
         self.curve_detail_scale_spin = self._make_spin(0.1, 20.0, 0.1, decimals=2)
         self.raster_spacing_spin = self._make_spin(0.01, 50.0, 0.01, decimals=3)
+        self.raster_line_spacing_spin = self._make_spin(0.0, 50.0, 0.01, decimals=3)
+        self.raster_line_spacing_spin.setSpecialValueText("Same as raster spacing")
+        self.image_mode_combo = QComboBox()
+        self.image_mode_combo.addItem("Vectorize to polygons", "vectorize")
+        self.image_mode_combo.addItem("Raster scanlines", "raster")
+        self.image_vector_num_colors_spin = QSpinBox()
+        self.image_vector_num_colors_spin.setRange(1, 256)
+        self.image_vector_num_colors_spin.setSingleStep(1)
+        self.image_vector_num_colors_spin.setAlignment(Qt.AlignRight)
+        self.image_vector_epsilon_spin = self._make_spin(0.0, 100.0, 0.1, decimals=3)
+        self.image_vector_min_area_spin = self._make_spin(0.0, 100000.0, 1.0, decimals=1)
+        self.image_vector_blur_kernel_spin = QSpinBox()
+        self.image_vector_blur_kernel_spin.setRange(1, 99)
+        self.image_vector_blur_kernel_spin.setSingleStep(2)
+        self.image_vector_blur_kernel_spin.setAlignment(Qt.AlignRight)
+        self.image_vector_max_pixels_spin = QSpinBox()
+        self.image_vector_max_pixels_spin.setRange(1, 100000000)
+        self.image_vector_max_pixels_spin.setSingleStep(1000)
+        self.image_vector_max_pixels_spin.setAlignment(Qt.AlignRight)
         self.plot_mode_combo = QComboBox()
         self.plot_mode_combo.addItem("Trace stroke outlines", "trace")
         self.plot_mode_combo.addItem("Centerline all strokes", "centerline")
@@ -1425,12 +1445,26 @@ class SettingsTab(QWidget):
         self._set_wide(self.outline_tolerance_spin)
         self._set_wide(self.curve_detail_scale_spin)
         self._set_wide(self.raster_spacing_spin)
+        self._set_wide(self.raster_line_spacing_spin)
+        self._set_wide(self.image_mode_combo)
+        self._set_wide(self.image_vector_num_colors_spin)
+        self._set_wide(self.image_vector_epsilon_spin)
+        self._set_wide(self.image_vector_min_area_spin)
+        self._set_wide(self.image_vector_blur_kernel_spin)
+        self._set_wide(self.image_vector_max_pixels_spin)
         self._set_wide(self.plot_mode_combo)
 
         sampling_form.addRow("Segment tolerance (mm)", self.segment_tolerance_spin)
         sampling_form.addRow("Outline simplify (mm)", self.outline_tolerance_spin)
         sampling_form.addRow("Curve detail scale", self.curve_detail_scale_spin)
         sampling_form.addRow("Raster spacing (mm)", self.raster_spacing_spin)
+        sampling_form.addRow("Raster line spacing (mm)", self.raster_line_spacing_spin)
+        sampling_form.addRow("Image mode", self.image_mode_combo)
+        sampling_form.addRow("Image vector colors", self.image_vector_num_colors_spin)
+        sampling_form.addRow("Image vector epsilon (px)", self.image_vector_epsilon_spin)
+        sampling_form.addRow("Image vector min area (px)", self.image_vector_min_area_spin)
+        sampling_form.addRow("Image vector blur kernel", self.image_vector_blur_kernel_spin)
+        sampling_form.addRow("Image vector max pixels", self.image_vector_max_pixels_spin)
         sampling_form.addRow("Plot mode", self.plot_mode_combo)
 
         layout.addWidget(sampling_group)
@@ -1539,6 +1573,14 @@ class SettingsTab(QWidget):
         self.outline_tolerance_spin.setValue(sampling.outline_simplify_tolerance)
         self.curve_detail_scale_spin.setValue(sampling.curve_detail_scale)
         self.raster_spacing_spin.setValue(sampling.raster_sample_spacing)
+        self.raster_line_spacing_spin.setValue(sampling.raster_line_spacing or 0.0)
+        image_mode_index = self.image_mode_combo.findData(sampling.image_mode)
+        self.image_mode_combo.setCurrentIndex(image_mode_index if image_mode_index >= 0 else 0)
+        self.image_vector_num_colors_spin.setValue(sampling.image_vector_num_colors)
+        self.image_vector_epsilon_spin.setValue(sampling.image_vector_epsilon)
+        self.image_vector_min_area_spin.setValue(sampling.image_vector_min_area)
+        self.image_vector_blur_kernel_spin.setValue(sampling.image_vector_blur_kernel)
+        self.image_vector_max_pixels_spin.setValue(sampling.image_vector_max_pixels)
         mode_index = self.plot_mode_combo.findData(sampling.plot_mode)
         self.plot_mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
 
@@ -1613,7 +1655,22 @@ class SettingsTab(QWidget):
             outline_simplify_tolerance=self.outline_tolerance_spin.value(),
             curve_detail_scale=self.curve_detail_scale_spin.value(),
             raster_sample_spacing=self.raster_spacing_spin.value(),
+            raster_line_spacing=(
+                self.raster_line_spacing_spin.value()
+                if self.raster_line_spacing_spin.value() > 0
+                else None
+            ),
             raster_max_cells=self._config.sampling.raster_max_cells,
+            image_mode=str(self.image_mode_combo.currentData() or "raster"),
+            image_vector_num_colors=self.image_vector_num_colors_spin.value(),
+            image_vector_epsilon=self.image_vector_epsilon_spin.value(),
+            image_vector_min_area=self.image_vector_min_area_spin.value(),
+            image_vector_blur_kernel=(
+                self.image_vector_blur_kernel_spin.value()
+                if self.image_vector_blur_kernel_spin.value() % 2 == 1
+                else self.image_vector_blur_kernel_spin.value() + 1
+            ),
+            image_vector_max_pixels=self.image_vector_max_pixels_spin.value(),
             plot_mode=str(self.plot_mode_combo.currentData() or "trace"),
             plot_stroke_width_threshold=self.perimeter_thickness_spin.value(),
         )
@@ -2448,7 +2505,7 @@ class MainWindow(QMainWindow):
             self,
             "Select artwork files",
             str(Path.cwd()),
-            "Artwork Files (*.svg *.pdf);;SVG Files (*.svg);;PDF Files (*.pdf);;All Files (*)",
+            "Artwork Files (*.svg *.pdf *.png *.jpg *.jpeg *.bmp *.webp *.gif *.tif *.tiff);;SVG Files (*.svg);;PDF Files (*.pdf);;Image Files (*.png *.jpg *.jpeg *.bmp *.webp *.gif *.tif *.tiff);;All Files (*)",
         )
         if filenames:
             self._handle_files_added(filenames)
@@ -2588,7 +2645,7 @@ class MainWindow(QMainWindow):
                 if not path.exists():
                     self._append_log(f"[WARNING] File not found: {path}")
                     continue
-                if path.suffix.lower() not in {".svg", ".pdf"}:
+                if path.suffix.lower() not in _SUPPORTED_ARTWORK_SUFFIXES:
                     self._append_log(f"[WARNING] Unsupported artwork file type: {path}")
                     continue
                 pdf_page = 1
@@ -2896,7 +2953,14 @@ class MainWindow(QMainWindow):
                 "outline_simplify_tolerance_mm": config.sampling.outline_simplify_tolerance,
                 "curve_detail_scale": config.sampling.curve_detail_scale,
                 "raster_sample_spacing_mm": config.sampling.raster_sample_spacing,
+                "raster_line_spacing_mm": config.sampling.raster_line_spacing,
                 "raster_max_cells": config.sampling.raster_max_cells,
+                "image_mode": config.sampling.image_mode,
+                "image_vector_num_colors": config.sampling.image_vector_num_colors,
+                "image_vector_epsilon_px": config.sampling.image_vector_epsilon,
+                "image_vector_min_area_px": config.sampling.image_vector_min_area,
+                "image_vector_blur_kernel_px": config.sampling.image_vector_blur_kernel,
+                "image_vector_max_pixels": config.sampling.image_vector_max_pixels,
                 "plot_mode": config.sampling.plot_mode,
             },
             "rendering": {

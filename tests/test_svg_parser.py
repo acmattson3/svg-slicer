@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from PIL import Image as PILImage
 from shapely.geometry import LineString, Polygon
 
 from svg_slicer.config import PrinterConfig
@@ -13,6 +14,7 @@ from svg_slicer.svg_parser import (
     _hershey_lines_for_text,
     _raster_pil_image_to_shape_geometries,
     _text_supported_by_hershey,
+    _vectorize_pil_image_to_shape_geometries,
     fit_shapes_to_bed,
     parse_svg,
     place_shapes_on_bed,
@@ -164,6 +166,18 @@ def test_hershey_glyph_data_cache_reuses_repeated_letters() -> None:
     assert cache_info.currsize >= 3
 
 
+def test_hershey_lines_preserve_space_advance() -> None:
+    pytest.importorskip("HersheyFonts")
+
+    tight = _hershey_lines_for_text("AA", x_base=0.0, y_base=0.0, font_size=12.0)
+    spaced = _hershey_lines_for_text("A A", x_base=0.0, y_base=0.0, font_size=12.0)
+
+    tight_maxx = max(line.bounds[2] for line in tight)
+    spaced_maxx = max(line.bounds[2] for line in spaced)
+
+    assert spaced_maxx > tight_maxx + 1.0
+
+
 def test_hershey_grouped_lines_split_disconnected_glyph_parts() -> None:
     pytest.importorskip("HersheyFonts")
     grouped_i = _hershey_grouped_lines_for_text("i", x_base=0.0, y_base=0.0, font_size=12.0)
@@ -180,6 +194,29 @@ def test_hershey_reports_superscript_and_diameter_symbol_as_unsupported() -> Non
     assert _text_supported_by_hershey("³", 12.0) is True
     assert _text_supported_by_hershey("Ø", 12.0) is True
     assert _text_supported_by_hershey("ø", 12.0) is True
+
+
+def test_vectorize_pil_image_to_shape_geometries_produces_polygons(slicer_config) -> None:
+    pytest.importorskip("cv2")
+    image = PILImage.new("RGBA", (64, 64), (255, 255, 255, 255))
+    for x in range(12, 52):
+        for y in range(16, 48):
+            image.putpixel((x, y), (0, 0, 0, 255))
+
+    shapes = _vectorize_pil_image_to_shape_geometries(
+        image,
+        (0.0, 0.0, 64.0, 64.0),
+        slicer_config.sampling,
+        clip_geom=None,
+    )
+
+    assert shapes
+    assert all(isinstance(shape.geometry, Polygon) for shape in shapes)
+    assert all(shape.toolpath_tag == "image-vector" for shape in shapes)
+    minx = min(shape.geometry.bounds[0] for shape in shapes)
+    maxx = max(shape.geometry.bounds[2] for shape in shapes)
+    assert minx < 20.0
+    assert maxx > 40.0
 
 
 def test_parse_svg_missing_font_falls_back_to_hershey(tmp_path: Path, slicer_config) -> None:
@@ -294,6 +331,25 @@ def test_raster_image_sampling_outputs_alternating_scanlines(slicer_config) -> N
     assert all(shape.toolpath_tag == "raster" for shape in shapes)
     assert list(shapes[0].geometry.coords) == pytest.approx([(0.0, 0.5), (3.0, 0.5)])
     assert list(shapes[1].geometry.coords) == pytest.approx([(3.0, 1.5), (0.0, 1.5)])
+
+
+def test_raster_spacing_preserves_row_gap_when_cell_cap_hits(slicer_config) -> None:
+    pil_image_module = pytest.importorskip("PIL.Image")
+    image = pil_image_module.new("RGBA", (1000, 200), (0, 0, 0, 255))
+    slicer_config.sampling.raster_sample_spacing = 0.8
+    slicer_config.sampling.raster_line_spacing = 0.8
+    slicer_config.sampling.raster_max_cells = 1000
+
+    shapes = _raster_pil_image_to_shape_geometries(
+        image,
+        (0.0, 0.0, 100.0, 20.0),
+        slicer_config.sampling,
+        None,
+    )
+
+    y_values = [shape.geometry.coords[0][1] for shape in shapes]
+    assert len(shapes) == 25
+    assert y_values[1] - y_values[0] == pytest.approx(0.8, rel=1e-6)
 
 
 def test_fit_shapes_to_bed_scales_into_printable_area(slicer_config) -> None:

@@ -754,7 +754,7 @@ def _glyph_data_for_character(
     font_name: str = "rowmans",
 ) -> Tuple[Tuple[Tuple[Tuple[float, float], ...], ...], float]:
     glyph_lines, advance_x = _cached_hershey_glyph_data(character, font_size, font_name)
-    if glyph_lines:
+    if glyph_lines or advance_x > 0:
         return glyph_lines, advance_x
 
     superscript_base = _SUPERSCRIPT_BASE_MAP.get(character)
@@ -1301,14 +1301,23 @@ def _raster_pil_image_to_shape_geometries(
     spacing = getattr(sampling, "raster_sample_spacing", None)
     if not spacing or spacing <= 0:
         spacing = max(sampling.segment_tolerance, 1.0)
+    line_spacing = getattr(sampling, "raster_line_spacing", None)
+    if not line_spacing or line_spacing <= 0:
+        line_spacing = spacing
     max_cells = int(getattr(sampling, "raster_max_cells", 4000))
     columns = max(1, min(width_px, int(math.ceil(width_world / spacing))))
-    rows = max(1, min(height_px, int(math.ceil(height_world / spacing))))
+    rows = max(1, min(height_px, int(math.ceil(height_world / line_spacing))))
     total_cells = columns * rows
     if total_cells > max_cells:
-        scale = math.sqrt(total_cells / max_cells)
-        columns = max(1, min(width_px, int(columns / scale)))
-        rows = max(1, min(height_px, int(rows / scale)))
+        explicit_line_spacing = getattr(sampling, "raster_line_spacing", None)
+        if explicit_line_spacing and explicit_line_spacing > 0:
+            # Explicit line spacing is a fidelity request. Keep both axes at the
+            # requested sampling instead of collapsing horizontal detail.
+            pass
+        else:
+            scale = math.sqrt(total_cells / max_cells)
+            columns = max(1, min(width_px, int(columns / scale)))
+            rows = max(1, min(height_px, int(rows / scale)))
 
     if columns == 0 or rows == 0:
         return shapes
@@ -1430,6 +1439,155 @@ def _raster_pil_image_to_shape_geometries(
     return shapes
 
 
+def _vectorize_pil_image_to_shape_geometries(
+    pil_image,
+    bbox: Tuple[float, float, float, float],
+    sampling: SamplingConfig,
+    clip_geom: BaseGeometry | None,
+    transform_params: List[float] | None = None,
+) -> List[ShapeGeometry]:
+    shapes: List[ShapeGeometry] = []
+
+    width_px, height_px = pil_image.size
+    if width_px == 0 or height_px == 0:
+        return shapes
+
+    minx, miny, maxx, maxy = bbox
+    width_world = maxx - minx
+    height_world = maxy - miny
+    if width_world <= 0 or height_world <= 0:
+        return shapes
+
+    try:
+        import cv2
+        import numpy as np
+    except Exception as exc:  # pragma: no cover - optional vector image dependency
+        logger.debug("Skipping vector image conversion because OpenCV/numpy is unavailable: %s", exc)
+        return shapes
+
+    if transform_params is None:
+        transform_params = [width_world, 0.0, 0.0, height_world, minx, miny]
+
+    rgba = np.array(pil_image.convert("RGBA"), dtype=np.uint8)
+    if rgba.size == 0:
+        return shapes
+
+    alpha = rgba[:, :, 3].astype(np.float32) / 255.0
+    rgb = rgba[:, :, :3].astype(np.float32)
+    composite = np.clip((rgb * alpha[:, :, None]) + (255.0 * (1.0 - alpha[:, :, None])), 0, 255).astype(np.uint8)
+    brightness = (
+        (0.299 * composite[:, :, 0]) + (0.587 * composite[:, :, 1]) + (0.114 * composite[:, :, 2])
+    ) / 255.0
+
+    alpha_threshold = 0.05
+    skip_brightness_threshold = 0.995
+    visible_mask = (alpha > alpha_threshold) & (brightness < skip_brightness_threshold)
+    if not visible_mask.any():
+        return shapes
+
+    max_pixels = max(1, int(getattr(sampling, "image_vector_max_pixels", 250000)))
+    resized_width = width_px
+    resized_height = height_px
+    resize_scale = 1.0
+    total_pixels = width_px * height_px
+    if total_pixels > max_pixels:
+        resize_scale = math.sqrt(max_pixels / total_pixels)
+        resized_width = max(1, int(round(width_px * resize_scale)))
+        resized_height = max(1, int(round(height_px * resize_scale)))
+        composite = cv2.resize(composite, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
+        visible_mask = cv2.resize(
+            visible_mask.astype(np.uint8),
+            (resized_width, resized_height),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+
+    blur_kernel = max(1, int(getattr(sampling, "image_vector_blur_kernel", 3)))
+    if blur_kernel % 2 == 0:
+        blur_kernel += 1
+    if blur_kernel > 1:
+        composite = cv2.medianBlur(composite, blur_kernel)
+
+    drawable_pixels = composite[visible_mask]
+    if drawable_pixels.size == 0:
+        return shapes
+
+    pixels = drawable_pixels.reshape((-1, 3)).astype(np.float32)
+    num_colors = min(max(1, int(getattr(sampling, "image_vector_num_colors", 16))), len(pixels))
+    if num_colors <= 0:
+        return shapes
+
+    criteria = (
+        cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+        30,
+        1.0,
+    )
+    _compactness, labels, centers = cv2.kmeans(
+        pixels,
+        num_colors,
+        None,
+        criteria,
+        3,
+        cv2.KMEANS_PP_CENTERS,
+    )
+
+    label_image = np.full((resized_height, resized_width), -1, dtype=np.int32)
+    label_image[visible_mask] = labels.reshape(-1)
+    centers = np.clip(centers, 0, 255).astype(np.uint8)
+
+    epsilon = max(0.0, float(getattr(sampling, "image_vector_epsilon", 6.0)) * resize_scale)
+    min_area = max(0.0, float(getattr(sampling, "image_vector_min_area", 64.0)) * resize_scale * resize_scale)
+    area_shapes: List[tuple[float, ShapeGeometry]] = []
+
+    for color_index, rgb_center in enumerate(centers):
+        center_rgb = (int(rgb_center[0]), int(rgb_center[1]), int(rgb_center[2]))
+        center_brightness = (0.299 * center_rgb[0] + 0.587 * center_rgb[1] + 0.114 * center_rgb[2]) / 255.0
+        if center_brightness >= skip_brightness_threshold:
+            continue
+        mask = np.uint8(label_image == color_index) * 255
+        if not mask.any():
+            continue
+        contours, _hierarchy = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < min_area:
+                continue
+            approx = cv2.approxPolyDP(contour, epsilon, True) if epsilon > 0 else contour
+            points = approx.reshape(-1, 2)
+            if len(points) < 3:
+                continue
+            polygon = Polygon(
+                [
+                    (float(x) / float(resized_width), float(y) / float(resized_height))
+                    for x, y in points
+                ]
+            )
+            if polygon.is_empty or polygon.area <= 0:
+                continue
+            polygon = shapely_affine_transform(polygon, transform_params)
+            if clip_geom is not None:
+                clipped = _apply_clip([polygon], clip_geom)
+            else:
+                clipped = [polygon]
+            for piece in clipped:
+                if piece.is_empty or piece.area <= 0:
+                    continue
+                area_shapes.append(
+                    (
+                        float(piece.area),
+                        ShapeGeometry(
+                            geometry=piece,
+                            brightness=max(0.0, min(1.0, center_brightness)),
+                            stroke_width=None,
+                            color=center_rgb,
+                            toolpath_tag="image-vector",
+                        ),
+                    )
+                )
+
+    area_shapes.sort(key=lambda item: item[0], reverse=True)
+    return [shape for _, shape in area_shapes]
+
+
 def _image_to_shape_geometries(
     element: Image, sampling: SamplingConfig, clip_geom: BaseGeometry | None
 ) -> List[ShapeGeometry]:
@@ -1443,7 +1601,12 @@ def _image_to_shape_geometries(
     bbox = element.bbox()
     if pil_image is None or bbox is None:
         return []
-    return _raster_pil_image_to_shape_geometries(
+    helper = (
+        _vectorize_pil_image_to_shape_geometries
+        if getattr(sampling, "image_mode", "raster") == "vectorize"
+        else _raster_pil_image_to_shape_geometries
+    )
+    return helper(
         pil_image,
         bbox,
         sampling,

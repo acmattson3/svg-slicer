@@ -4,7 +4,37 @@ from pathlib import Path
 from typing import List
 
 from .config import SamplingConfig
-from .svg_parser import ShapeGeometry, parse_svg
+from .svg_parser import (
+    ShapeGeometry,
+    _raster_pil_image_to_shape_geometries,
+    _vectorize_pil_image_to_shape_geometries,
+    parse_svg,
+)
+
+
+_BITMAP_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif", ".tif", ".tiff"}
+
+
+def _parse_bitmap(path: Path, sampling: SamplingConfig) -> List[ShapeGeometry]:
+    try:
+        from PIL import Image as PILImage
+    except Exception as exc:
+        raise RuntimeError("Bitmap import requires Pillow. Install it with `pip install Pillow`.") from exc
+
+    with PILImage.open(path) as pil_image:
+        pil_image.load()
+        bbox = (0.0, 0.0, float(pil_image.width), float(pil_image.height))
+        helper = (
+            _vectorize_pil_image_to_shape_geometries
+            if getattr(sampling, "image_mode", "raster") == "vectorize"
+            else _raster_pil_image_to_shape_geometries
+        )
+        return helper(
+            pil_image,
+            bbox,
+            sampling,
+            clip_geom=None,
+        )
 
 
 def parse_artwork(
@@ -27,4 +57,8 @@ def parse_artwork(
             page_number=pdf_page,
             force_hershey_text=force_hershey_text,
         )
-    raise ValueError(f"Unsupported artwork file type '{source.suffix}'. Expected .svg or .pdf.")
+    if suffix in _BITMAP_SUFFIXES:
+        return _parse_bitmap(source, sampling)
+    raise ValueError(
+        f"Unsupported artwork file type '{source.suffix}'. Expected .svg, .pdf, or a bitmap image."
+    )

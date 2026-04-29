@@ -317,6 +317,75 @@ def _build_stroke_toolpaths(shape: ShapeGeometry, config: SlicerConfig) -> List[
     )
 
 
+def _downsample_scaled_raster_shapes(
+    shapes: Iterable[ShapeGeometry],
+    config: SlicerConfig,
+) -> List[ShapeGeometry]:
+    desired_spacing = config.sampling.raster_line_spacing or config.sampling.raster_sample_spacing
+    if desired_spacing <= 0:
+        return list(shapes)
+
+    shape_list = list(shapes)
+    raster_rows: List[tuple[float, int]] = []
+    for index, shape in enumerate(shape_list):
+        if shape.toolpath_tag != "raster" or not isinstance(shape.geometry, LineString):
+            continue
+        coords = list(shape.geometry.coords)
+        if len(coords) < 2:
+            continue
+        y_value = sum(point[1] for point in coords) / len(coords)
+        raster_rows.append((y_value, index))
+
+    if len(raster_rows) < 2:
+        return shape_list
+
+    raster_rows.sort(key=lambda item: item[0])
+    current_spacing = min(
+        y2 - y1
+        for (y1, _), (y2, _) in zip(raster_rows, raster_rows[1:])
+        if y2 - y1 > 1e-9
+    ) if any((b[0] - a[0]) > 1e-9 for a, b in zip(raster_rows, raster_rows[1:])) else desired_spacing
+
+    if current_spacing >= desired_spacing - 1e-9:
+        return shape_list
+
+    keep_indices: set[int] = set()
+    last_kept_y: float | None = None
+    row_members: List[int] = []
+    row_y: float | None = None
+
+    def flush_row() -> None:
+        nonlocal last_kept_y, row_members, row_y
+        if row_y is None or not row_members:
+            row_members = []
+            row_y = None
+            return
+        if last_kept_y is None or (row_y - last_kept_y) >= desired_spacing - 1e-9:
+            keep_indices.update(row_members)
+            last_kept_y = row_y
+        row_members = []
+        row_y = None
+
+    for y_value, index in raster_rows:
+        if row_y is None:
+            row_y = y_value
+            row_members = [index]
+            continue
+        if abs(y_value - row_y) <= 1e-6:
+            row_members.append(index)
+            continue
+        flush_row()
+        row_y = y_value
+        row_members = [index]
+    flush_row()
+
+    return [
+        shape
+        for index, shape in enumerate(shape_list)
+        if shape.toolpath_tag != "raster" or index in keep_indices
+    ]
+
+
 def _build_toolpaths(
     shapes: Iterable[ShapeGeometry],
     config: SlicerConfig,
@@ -459,6 +528,7 @@ def generate_toolpaths_for_shapes(
             )
         fitted_shapes = shape_list
         applied_scale = 1.0
+    fitted_shapes = _downsample_scaled_raster_shapes(fitted_shapes, config)
     _notify(progress_update, "Generating toolpaths…")
     toolpaths = _build_toolpaths(
         fitted_shapes,
@@ -711,6 +781,16 @@ def _parse_positive_float_argument(name: str, value: str) -> float:
     return number
 
 
+def _parse_positive_int_argument(name: str, value: str) -> int:
+    try:
+        number = int(round(float(value)))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{name} must be a number") from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"{name} must be greater than zero")
+    return number
+
+
 def slice_svg_to_gcode(
     artwork_path: Path,
     output_path: Path,
@@ -821,6 +901,54 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--raster-line-spacing",
+        type=lambda value: _parse_positive_float_argument("raster line spacing", value),
+        default=None,
+        metavar="MM",
+        help="Override the gap between raster scanlines without changing horizontal image sampling.",
+    )
+    parser.add_argument(
+        "--image-mode",
+        choices=["raster", "vectorize"],
+        default=None,
+        help="Choose how embedded bitmap images are converted: raster scanlines or vectorized polygons.",
+    )
+    parser.add_argument(
+        "--image-vector-colors",
+        type=lambda value: _parse_positive_int_argument("image vector colors", value),
+        default=None,
+        metavar="COUNT",
+        help="Override the number of k-means colors used for image vectorization.",
+    )
+    parser.add_argument(
+        "--image-vector-epsilon",
+        type=lambda value: _parse_positive_float_argument("image vector epsilon", value),
+        default=None,
+        metavar="PX",
+        help="Override polygon simplification epsilon in pixels for image vectorization.",
+    )
+    parser.add_argument(
+        "--image-vector-min-area",
+        type=lambda value: _parse_positive_float_argument("image vector min area", value),
+        default=None,
+        metavar="PX",
+        help="Override minimum contour area in pixels for image vectorization.",
+    )
+    parser.add_argument(
+        "--image-vector-blur",
+        type=lambda value: _parse_positive_int_argument("image vector blur kernel", value),
+        default=None,
+        metavar="PX",
+        help="Override median blur kernel size in pixels for image vectorization.",
+    )
+    parser.add_argument(
+        "--image-vector-max-pixels",
+        type=lambda value: _parse_positive_int_argument("image vector max pixels", value),
+        default=None,
+        metavar="COUNT",
+        help="Override the maximum working pixel count before image vectorization downsamples.",
+    )
+    parser.add_argument(
         "--pdf-page",
         type=int,
         default=1,
@@ -877,6 +1005,23 @@ def main(argv: List[str] | None = None) -> int:
     if args.raster_spacing is not None:
         config.sampling.raster_sample_spacing = float(args.raster_spacing)
         logger.info("Raster spacing override: %.3f mm", config.sampling.raster_sample_spacing)
+    if args.raster_line_spacing is not None:
+        config.sampling.raster_line_spacing = float(args.raster_line_spacing)
+        logger.info("Raster line spacing override: %.3f mm", config.sampling.raster_line_spacing)
+    if args.image_mode is not None:
+        config.sampling.image_mode = str(args.image_mode)
+        logger.info("Embedded image mode override: %s", config.sampling.image_mode)
+    if args.image_vector_colors is not None:
+        config.sampling.image_vector_num_colors = int(args.image_vector_colors)
+    if args.image_vector_epsilon is not None:
+        config.sampling.image_vector_epsilon = float(args.image_vector_epsilon)
+    if args.image_vector_min_area is not None:
+        config.sampling.image_vector_min_area = float(args.image_vector_min_area)
+    if args.image_vector_blur is not None:
+        blur = int(args.image_vector_blur)
+        config.sampling.image_vector_blur_kernel = blur if blur % 2 == 1 else blur + 1
+    if args.image_vector_max_pixels is not None:
+        config.sampling.image_vector_max_pixels = int(args.image_vector_max_pixels)
 
     if config.printer.color_mode and not config.printer.available_colors:
         logger.error(

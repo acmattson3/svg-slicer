@@ -75,7 +75,14 @@ class SamplingConfig:
     outline_simplify_tolerance: float
     curve_detail_scale: float = 1.0
     raster_sample_spacing: float = 2.0
+    raster_line_spacing: float | None = None
     raster_max_cells: int = 4000
+    image_mode: str = "vectorize"
+    image_vector_num_colors: int = 16
+    image_vector_epsilon: float = 6.0
+    image_vector_min_area: float = 64.0
+    image_vector_blur_kernel: int = 3
+    image_vector_max_pixels: int = 250000
     plot_mode: str = "trace"
     plot_stroke_width_threshold: float = 0.0
 
@@ -164,6 +171,52 @@ def _normalize_plot_mode(value: Any) -> str:
     if mode not in aliases:
         raise ConfigError("'plot_mode' must be one of: false, true, trace, centerline, auto.")
     return aliases[mode]
+
+
+def _normalize_image_mode(value: Any) -> str:
+    if value is None:
+        return "vectorize"
+    mode = str(value).strip().lower()
+    aliases = {
+        "": "vectorize",
+        "raster": "raster",
+        "scanline": "raster",
+        "vector": "vectorize",
+        "vectorize": "vectorize",
+        "vectorized": "vectorize",
+        "polygon": "vectorize",
+        "polygons": "vectorize",
+    }
+    if mode not in aliases:
+        raise ConfigError("'image_mode' must be one of: raster, vectorize.")
+    return aliases[mode]
+
+
+def _normalize_positive_int(value: Any, *, name: str, default: int, minimum: int = 1) -> int:
+    if value is None:
+        return default
+    try:
+        parsed = int(round(float(value)))
+    except (TypeError, ValueError):
+        raise ConfigError(f"'{name}' must be a numeric value.") from None
+    return max(minimum, parsed)
+
+
+def _normalize_positive_float(value: Any, *, name: str, default: float, minimum: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise ConfigError(f"'{name}' must be a numeric value.") from None
+    return max(minimum, parsed)
+
+
+def _normalize_blur_kernel(value: Any) -> int:
+    kernel = _normalize_positive_int(value, name="image_vector_blur_kernel_px", default=3, minimum=1)
+    if kernel % 2 == 0:
+        kernel += 1
+    return kernel
 
 
 def _parse_printer_config(printer_raw: Dict[str, Any], fallback_name: str | None = None) -> PrinterConfig:
@@ -296,7 +349,38 @@ def load_config(path: str | pathlib.Path, profile: str | None = None) -> SlicerC
         ),
         curve_detail_scale=float(sampling_raw.get("curve_detail_scale", 1.0)),
         raster_sample_spacing=float(sampling_raw.get("raster_sample_spacing_mm", 2.0)),
+        raster_line_spacing=(
+            float(sampling_raw["raster_line_spacing_mm"])
+            if sampling_raw.get("raster_line_spacing_mm") is not None
+            else None
+        ),
         raster_max_cells=int(sampling_raw.get("raster_max_cells", 4000)),
+        image_mode=_normalize_image_mode(sampling_raw.get("image_mode", "vectorize")),
+        image_vector_num_colors=_normalize_positive_int(
+            sampling_raw.get("image_vector_num_colors", 16),
+            name="image_vector_num_colors",
+            default=16,
+        ),
+        image_vector_epsilon=_normalize_positive_float(
+            sampling_raw.get("image_vector_epsilon_px", 6.0),
+            name="image_vector_epsilon_px",
+            default=6.0,
+            minimum=0.0,
+        ),
+        image_vector_min_area=_normalize_positive_float(
+            sampling_raw.get("image_vector_min_area_px", 64.0),
+            name="image_vector_min_area_px",
+            default=64.0,
+            minimum=0.0,
+        ),
+        image_vector_blur_kernel=_normalize_blur_kernel(
+            sampling_raw.get("image_vector_blur_kernel_px", 3)
+        ),
+        image_vector_max_pixels=_normalize_positive_int(
+            sampling_raw.get("image_vector_max_pixels", 250000),
+            name="image_vector_max_pixels",
+            default=250000,
+        ),
         plot_mode=_normalize_plot_mode(plot_mode_raw),
         plot_stroke_width_threshold=float(plot_threshold_raw),
     )

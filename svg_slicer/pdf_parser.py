@@ -24,6 +24,7 @@ from .svg_parser import (
     _resolve_visibility,
     _text_string_to_polygons,
     _text_supported_by_hershey,
+    _vectorize_pil_image_to_shape_geometries,
 )
 
 
@@ -434,7 +435,12 @@ def _image_block_to_shapes(block, sampling: SamplingConfig) -> List[ShapeGeometr
     except Exception as exc:  # pragma: no cover - bad image data
         logger.debug("Skipping PDF image block that cannot be loaded: %s", exc)
         return []
-    return _raster_pil_image_to_shape_geometries(
+    helper = (
+        _vectorize_pil_image_to_shape_geometries
+        if getattr(sampling, "image_mode", "raster") == "vectorize"
+        else _raster_pil_image_to_shape_geometries
+    )
+    return helper(
         pil_image,
         (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])),
         sampling,

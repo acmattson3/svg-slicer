@@ -57,6 +57,38 @@ def test_generate_toolpaths_skips_effectively_white_shapes_in_bw_mode(slicer_con
         cli.generate_toolpaths_for_shapes([shape], slicer_config, fit_to_bed=False)
 
 
+def test_generate_toolpaths_downsamples_scaled_raster_rows(slicer_config) -> None:
+    slicer_config.sampling.raster_sample_spacing = 1.0
+    shapes = [
+        ShapeGeometry(
+            geometry=LineString([(0.0, 0.5), (10.0, 0.5)]),
+            brightness=0.0,
+            stroke_width=0.0,
+            color=(0, 0, 0),
+            toolpath_tag="raster",
+        ),
+        ShapeGeometry(
+            geometry=LineString([(10.0, 1.0), (0.0, 1.0)]),
+            brightness=0.0,
+            stroke_width=0.0,
+            color=(0, 0, 0),
+            toolpath_tag="raster",
+        ),
+        ShapeGeometry(
+            geometry=LineString([(0.0, 1.5), (10.0, 1.5)]),
+            brightness=0.0,
+            stroke_width=0.0,
+            color=(0, 0, 0),
+            toolpath_tag="raster",
+        ),
+    ]
+
+    toolpaths, _ = cli.generate_toolpaths_for_shapes(shapes, slicer_config, fit_to_bed=False)
+
+    raster_paths = [toolpath for toolpath in toolpaths if toolpath.tag == "raster"]
+    assert len(raster_paths) == 2
+
+
 def test_parse_scale_argument_accepts_auto_none_factor_and_percent() -> None:
     assert cli._parse_scale_argument("auto") is None
     assert cli._parse_scale_argument("none") == pytest.approx(1.0)
@@ -122,6 +154,48 @@ def test_argument_parser_supports_raster_spacing() -> None:
     args = parser.parse_args(["input.pdf", "--raster-spacing", "0.75"])
 
     assert args.raster_spacing == pytest.approx(0.75)
+
+
+def test_argument_parser_supports_raster_line_spacing() -> None:
+    parser = cli.build_argument_parser()
+
+    args = parser.parse_args(["input.pdf", "--raster-line-spacing", "0.8"])
+
+    assert args.raster_line_spacing == pytest.approx(0.8)
+
+
+def test_argument_parser_supports_image_mode() -> None:
+    parser = cli.build_argument_parser()
+
+    args = parser.parse_args(["input.pdf", "--image-mode", "vectorize"])
+
+    assert args.image_mode == "vectorize"
+
+
+def test_argument_parser_supports_image_vector_knobs() -> None:
+    parser = cli.build_argument_parser()
+
+    args = parser.parse_args(
+        [
+            "input.pdf",
+            "--image-vector-colors",
+            "24",
+            "--image-vector-epsilon",
+            "2.5",
+            "--image-vector-min-area",
+            "18",
+            "--image-vector-blur",
+            "5",
+            "--image-vector-max-pixels",
+            "123456",
+        ]
+    )
+
+    assert args.image_vector_colors == 24
+    assert args.image_vector_epsilon == pytest.approx(2.5)
+    assert args.image_vector_min_area == pytest.approx(18.0)
+    assert args.image_vector_blur == 5
+    assert args.image_vector_max_pixels == 123456
 
 
 def test_argument_parser_supports_write_in_order() -> None:
@@ -611,6 +685,7 @@ def test_main_passes_raster_spacing_override(monkeypatch, slicer_config, tmp_pat
         write_in_order=False,
     ):
         called["raster_spacing"] = config.sampling.raster_sample_spacing
+        called["raster_line_spacing"] = config.sampling.raster_line_spacing
         called["verbose_gcode"] = verbose_gcode
         called["write_in_order"] = write_in_order
 
@@ -620,9 +695,70 @@ def test_main_passes_raster_spacing_override(monkeypatch, slicer_config, tmp_pat
     pdf_path = tmp_path / "input.pdf"
     pdf_path.write_bytes(b"%PDF-1.7\n")
 
-    code = cli.main([str(pdf_path), "--raster-spacing", "0.6"])
+    code = cli.main([str(pdf_path), "--raster-spacing", "0.6", "--raster-line-spacing", "0.8"])
     assert code == 0
     assert called["raster_spacing"] == pytest.approx(0.6)
+    assert called["raster_line_spacing"] == pytest.approx(0.8)
+
+
+def test_main_passes_image_vector_overrides(monkeypatch, slicer_config, tmp_path: Path) -> None:
+    called = {}
+
+    def fake_load_config(path, profile=None):
+        return slicer_config
+
+    def fake_slice(
+        svg,
+        output,
+        config,
+        preview,
+        preview_file,
+        *,
+        scale_factor=None,
+        alignment="center",
+        pdf_page=1,
+        force_hershey_text=False,
+        rotation_degrees=0.0,
+        verbose_gcode=False,
+        write_in_order=False,
+    ):
+        called["image_mode"] = config.sampling.image_mode
+        called["image_vector_num_colors"] = config.sampling.image_vector_num_colors
+        called["image_vector_epsilon"] = config.sampling.image_vector_epsilon
+        called["image_vector_min_area"] = config.sampling.image_vector_min_area
+        called["image_vector_blur_kernel"] = config.sampling.image_vector_blur_kernel
+        called["image_vector_max_pixels"] = config.sampling.image_vector_max_pixels
+
+    monkeypatch.setattr(cli, "load_config", fake_load_config)
+    monkeypatch.setattr(cli, "slice_svg_to_gcode", fake_slice)
+
+    png_path = tmp_path / "input.png"
+    png_path.write_bytes(b"not-a-real-image")
+
+    code = cli.main(
+        [
+            str(png_path),
+            "--image-mode",
+            "vectorize",
+            "--image-vector-colors",
+            "24",
+            "--image-vector-epsilon",
+            "2.5",
+            "--image-vector-min-area",
+            "18",
+            "--image-vector-blur",
+            "4",
+            "--image-vector-max-pixels",
+            "123456",
+        ]
+    )
+    assert code == 0
+    assert called["image_mode"] == "vectorize"
+    assert called["image_vector_num_colors"] == 24
+    assert called["image_vector_epsilon"] == pytest.approx(2.5)
+    assert called["image_vector_min_area"] == pytest.approx(18.0)
+    assert called["image_vector_blur_kernel"] == 5
+    assert called["image_vector_max_pixels"] == 123456
 
 
 def test_main_passes_write_in_order_to_slice(monkeypatch, slicer_config, tmp_path: Path) -> None:
