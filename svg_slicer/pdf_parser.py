@@ -302,7 +302,7 @@ def _text_block_to_shapes(block) -> List[ShapeGeometry]:
         origin = line.get("origin") or first_span.get("origin") or (0.0, 0.0)
         size = float(first_span.get("size") or 12.0)
         rgb = _pdf_rgb_to_tuple(first_span.get("color")) or (0, 0, 0)
-        transform = [cos_a, sin_a, -sin_a, cos_a, float(origin[0]), float(origin[1])]
+        transform = [cos_a, -sin_a, sin_a, cos_a, float(origin[0]), float(origin[1])]
 
         span_bounds = [span.get("bbox") for span in spans if span.get("bbox") and len(span.get("bbox")) >= 4]
         nonspace_chars = [

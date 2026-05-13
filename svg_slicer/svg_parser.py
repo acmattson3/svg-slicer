@@ -783,8 +783,8 @@ def _glyph_data_for_character(
                 inset_x = max((maxx - minx) * 0.12, font_size * 0.04)
                 inset_y = max((maxy - miny) * 0.12, font_size * 0.04)
                 slash = (
-                    (minx + inset_x, maxy - inset_y),
-                    (maxx - inset_x, miny + inset_y),
+                    (minx + inset_x, miny + inset_y),
+                    (maxx - inset_x, maxy - inset_y),
                 )
                 return base_lines + (slash,), base_advance
 

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
 from shapely.geometry import LineString, Polygon
 
 from svg_slicer.artwork_parser import parse_artwork
-from svg_slicer.pdf_parser import _drawing_items_to_lines
+from svg_slicer.pdf_parser import _drawing_items_to_lines, _text_block_to_shapes
 
 
 def test_parse_pdf_hybrid_imports_vectors_and_text(tmp_path: Path, slicer_config) -> None:
@@ -201,3 +202,35 @@ def test_parse_pdf_hershey_text_keeps_superscript_and_diameter_symbol(tmp_path: 
     assert line_shapes
     maxx = max(shape.geometry.bounds[2] for shape in shapes)
     assert maxx > 120.0
+
+
+def test_pdf_hershey_text_rotation_follows_line_direction(slicer_config) -> None:
+    angle = math.radians(45.0)
+    block = {
+        "lines": [
+            {
+                "dir": (math.cos(angle), math.sin(angle)),
+                "origin": (20.0, 20.0),
+                "spans": [
+                    {
+                        "size": 18.0,
+                        "font": "helv",
+                        "color": 0,
+                        "bbox": (18.0, 18.0, 36.0, 36.0),
+                        "chars": [
+                            {"c": "-", "bbox": (18.0, 18.0, 36.0, 36.0)},
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    shapes = _text_block_to_shapes(block)
+    line_shapes = [shape.geometry for shape in shapes if isinstance(shape.geometry, LineString)]
+    assert line_shapes
+    coords = list(max(line_shapes, key=lambda line: line.length).coords)
+    dx = coords[-1][0] - coords[0][0]
+    dy = coords[-1][1] - coords[0][1]
+    assert dx > 0
+    assert dy > 0

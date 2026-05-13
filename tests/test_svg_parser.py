@@ -196,6 +196,16 @@ def test_hershey_reports_superscript_and_diameter_symbol_as_unsupported() -> Non
     assert _text_supported_by_hershey("ø", 12.0) is True
 
 
+def test_diameter_symbol_uses_forward_slash() -> None:
+    pytest.importorskip("HersheyFonts")
+    lines = _hershey_lines_for_text("Ø", x_base=0.0, y_base=0.0, font_size=12.0)
+    slash = max(lines, key=lambda line: abs(line.coords[-1][0] - line.coords[0][0]))
+    dx = slash.coords[-1][0] - slash.coords[0][0]
+    dy = slash.coords[-1][1] - slash.coords[0][1]
+    assert dx > 0
+    assert dy < 0
+
+
 def test_vectorize_pil_image_to_shape_geometries_produces_polygons(slicer_config) -> None:
     pytest.importorskip("cv2")
     image = PILImage.new("RGBA", (64, 64), (255, 255, 255, 255))
