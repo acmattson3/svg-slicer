@@ -6,6 +6,7 @@ import pytest
 from shapely.geometry import LineString, Polygon
 
 from svg_slicer.artwork_parser import parse_artwork
+from svg_slicer.pdf_parser import _drawing_items_to_lines
 
 
 def test_parse_pdf_hybrid_imports_vectors_and_text(tmp_path: Path, slicer_config) -> None:
@@ -91,6 +92,32 @@ def test_parse_pdf_merges_adjacent_stroke_segments(tmp_path: Path, slicer_config
     assert miny == pytest.approx(20.0)
     assert maxx == pytest.approx(110.0)
     assert maxy == pytest.approx(20.0)
+
+
+def test_pdf_drawing_lines_close_path_adds_missing_edge(slicer_config) -> None:
+    fitz = pytest.importorskip("fitz")
+
+    items = [
+        ("l", fitz.Point(10, 10), fitz.Point(20, 10)),
+        ("l", fitz.Point(20, 10), fitz.Point(20, 20)),
+        ("l", fitz.Point(20, 20), fitz.Point(10, 20)),
+    ]
+
+    lines = _drawing_items_to_lines(items, slicer_config.sampling, close_path=True)
+
+    assert len(lines) == 1
+    assert list(lines[0].coords)[0] == pytest.approx((10.0, 10.0))
+    assert list(lines[0].coords)[-1] == pytest.approx((10.0, 10.0))
+
+
+def test_pdf_drawing_lines_support_quad_operator(slicer_config) -> None:
+    fitz = pytest.importorskip("fitz")
+
+    quad = fitz.Quad(fitz.Point(10, 10), fitz.Point(20, 10), fitz.Point(10, 20), fitz.Point(20, 20))
+    lines = _drawing_items_to_lines([("qu", quad)], slicer_config.sampling)
+
+    assert len(lines) == 1
+    assert len(list(lines[0].coords)) == 5
 
 
 def test_parse_pdf_hershey_text_fits_span_bounds(tmp_path: Path, slicer_config) -> None:

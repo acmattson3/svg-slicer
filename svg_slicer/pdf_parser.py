@@ -93,14 +93,37 @@ def _sample_cubic(p0, p1, p2, p3, tolerance: float, detail_scale: float) -> List
     return [point(i / steps) for i in range(1, steps + 1)]
 
 
-def _drawing_items_to_lines(items, sampling: SamplingConfig, page_rect=None) -> List[LineString]:
+def _quad_points(quad) -> List[Tuple[float, float]]:
+    if hasattr(quad, "ul") and hasattr(quad, "ur") and hasattr(quad, "lr") and hasattr(quad, "ll"):
+        return [
+            (float(quad.ul.x), float(quad.ul.y)),
+            (float(quad.ur.x), float(quad.ur.y)),
+            (float(quad.lr.x), float(quad.lr.y)),
+            (float(quad.ll.x), float(quad.ll.y)),
+        ]
+    if isinstance(quad, (list, tuple)) and len(quad) == 4:
+        points: List[Tuple[float, float]] = []
+        for point in quad:
+            if hasattr(point, "x") and hasattr(point, "y"):
+                points.append((float(point.x), float(point.y)))
+            elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                points.append((float(point[0]), float(point[1])))
+        if len(points) == 4:
+            return points
+    return []
+
+
+def _drawing_items_to_lines(items, sampling: SamplingConfig, page_rect=None, close_path: bool = False) -> List[LineString]:
     lines: List[LineString] = []
     current: List[Tuple[float, float]] = []
 
     def flush() -> None:
         nonlocal current
         if len(current) >= 2:
-            line = LineString(current)
+            coords = list(current)
+            if close_path and coords[0] != coords[-1]:
+                coords.append(coords[0])
+            line = LineString(coords)
             if not line.is_empty and line.length > 0:
                 lines.append(line)
         current = []
@@ -136,6 +159,11 @@ def _drawing_items_to_lines(items, sampling: SamplingConfig, page_rect=None) -> 
                 (float(rect.x0), float(rect.y0)),
             ]
             lines.append(LineString(coords))
+        elif op == "qu":
+            flush()
+            points = _quad_points(item[1])
+            if len(points) == 4:
+                lines.append(LineString(points + [points[0]]))
         else:
             logger.debug("Skipping unsupported PDF drawing operator: %s", op)
             flush()
@@ -145,7 +173,12 @@ def _drawing_items_to_lines(items, sampling: SamplingConfig, page_rect=None) -> 
 
 def _drawing_to_shapes(drawing, sampling: SamplingConfig, page_rect=None) -> List[ShapeGeometry]:
     shapes: List[ShapeGeometry] = []
-    lines = _drawing_items_to_lines(drawing.get("items", []), sampling, page_rect=page_rect)
+    lines = _drawing_items_to_lines(
+        drawing.get("items", []),
+        sampling,
+        page_rect=page_rect,
+        close_path=bool(drawing.get("closePath")),
+    )
     if not lines:
         return shapes
 
